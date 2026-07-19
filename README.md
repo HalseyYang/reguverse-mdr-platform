@@ -49,6 +49,73 @@ The backend is intended to expose workflow APIs, upload and extraction APIs, AI 
 
 Sensitive values such as API keys must stay in local `.env` files and must not be committed.
 
+## Run Locally
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the API:
+
+```bash
+npm run api
+```
+
+Start the frontend in another terminal:
+
+```bash
+npm run dev
+```
+
+Run tests:
+
+```bash
+npm test
+```
+
+Build the frontend:
+
+```bash
+npm run build
+```
+
+## Local Service Mode
+
+On macOS, the prototype includes launchd helpers for keeping the local API and frontend available:
+
+```bash
+npm run service:install
+npm run service:status
+npm run service:uninstall
+```
+
+## AI Configuration
+
+Copy `.env.example` to `.env`, then add your local API key:
+
+```text
+AI_PROVIDER=deepseek
+AI_BASE_URL=https://api.deepseek.com
+AI_PROFILE_MODEL=deepseek-v4-flash
+DEEPSEEK_API_KEY=sk-your-deepseek-key-here
+```
+
+Do not commit `.env`.
+
+## Source Layout
+
+```text
+server.js                 Express API and workflow logic
+src/main.jsx              React application entry and UI logic
+src/styles.css            Application styling
+tests/*.test.mjs          Node test suite
+scripts/                  Local launchd service helpers
+launchd/                  macOS launchd plist templates
+docs/                     Product and regulatory design documents
+```
+
 ## Intended Users
 
 - Medical device regulatory affairs teams

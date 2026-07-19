@@ -1,0 +1,25 @@
+{
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "api": "node server.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "service:install": "bash scripts/install-local-services.sh",
+    "service:status": "bash scripts/local-services-status.sh",
+    "service:uninstall": "bash scripts/uninstall-local-services.sh"
+  },
+  "type": "module",
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "lucide-react": "latest",
+    "mammoth": "^1.12.0",
+    "multer": "^2.2.0",
+    "pdf-parse": "^2.4.5",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  }
+}
