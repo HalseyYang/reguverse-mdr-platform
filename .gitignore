@@ -23,3 +23,4 @@ outputs/
 # OS/editor files
 .DS_Store
 .codex/
+.worktrees/
