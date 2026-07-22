@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  listActive,
   listActiveProjects,
+  listDeleted,
   listDeletedProjects,
+  prepareDeletedProjects,
   purgeExpiredProjects,
+  restore,
   restoreProject,
   softDeleteProject
 } from '../server/project-lifecycle.js';
@@ -76,4 +80,22 @@ test('purgeExpiredProjects removes an expired project graph and preserves other 
 test('project lifecycle operations return clear errors for missing projects', () => {
   assert.throws(() => softDeleteProject(fixture(), 'missing', NOW), /Project not found: missing/);
   assert.throws(() => restoreProject(fixture(), 'missing'), /Project not found: missing/);
+});
+
+test('specification aliases listActive, listDeleted, and restore execute lifecycle behavior', () => {
+  const deleted = softDeleteProject(fixture(), 'alpha', NOW).db;
+
+  assert.deepEqual(listActive(deleted).map(({ id }) => id), ['beta']);
+  assert.deepEqual(listDeleted(deleted).map(({ id }) => id), ['alpha']);
+  assert.equal(restore(deleted, 'alpha').project.deletedAt, undefined);
+});
+
+test('deleted-project handling purges expired projects before returning the recycle bin', () => {
+  const deleted = softDeleteProject(fixture(), 'alpha', '2026-06-01T00:00:00.000Z').db;
+  const result = prepareDeletedProjects(deleted, '2026-07-02T00:00:00.000Z');
+
+  assert.deepEqual(result.projects, []);
+  assert.equal(result.db.projects.some(({ id }) => id === 'alpha'), false);
+  assert.deepEqual(result.purgedProjectIds, ['alpha']);
+  assert.deepEqual(result.uploadReferences, ['server-generated-a']);
 });

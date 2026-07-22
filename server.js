@@ -6,7 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   listActiveProjects,
-  listDeletedProjects,
+  prepareDeletedProjects,
   purgeExpiredProjects,
   purgeProject,
   restoreProject,
@@ -915,7 +915,12 @@ app.get('/api/projects', async (req, res) => {
 
 app.get('/api/projects/deleted', async (req, res) => {
   const db = await readDb();
-  res.json(listDeletedProjects(db));
+  const result = prepareDeletedProjects(db, new Date());
+  if (result.purgedProjectIds.length) {
+    await writeDb(result.db);
+    await removeStoredUploads(result.uploadReferences);
+  }
+  res.json(result.projects);
 });
 
 app.post('/api/projects', async (req, res) => {

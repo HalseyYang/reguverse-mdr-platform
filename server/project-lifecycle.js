@@ -76,3 +76,12 @@ export function purgeExpiredProjects(db, now) {
   }
   return { db: next, purgedProjectIds: expiredIds, uploadReferences };
 }
+
+export function prepareDeletedProjects(db, now) {
+  const purged = purgeExpiredProjects(db, now);
+  return { ...purged, projects: listDeletedProjects(purged.db) };
+}
+
+export const listActive = listActiveProjects;
+export const listDeleted = listDeletedProjects;
+export const restore = restoreProject;
