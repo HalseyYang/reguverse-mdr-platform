@@ -1051,12 +1051,24 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     notify('画像草稿已保存到本机浏览器。');
   };
 
-  const saveExistingProfile = async () => {
+  const saveExistingProfile = async (saveMode = 'draft') => {
     await api(`/projects/${projectId}/profile`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(normalizeMarketProfile(draft))
+      body: JSON.stringify({ profile: normalizeMarketProfile(draft), save_mode: saveMode })
     });
+  };
+
+  const saveDraft = async () => {
+    saveDraftLocally();
+    const plan = savePlanForStepAction({ mode, action: 'draft' });
+    if (!plan.server) return;
+    try {
+      await saveExistingProfile(plan.saveMode);
+      notify('画像草稿已保存到项目。');
+    } catch {
+      notify('保存画像草稿失败，请确认本地 API 服务已启动。');
+    }
   };
 
   const goToStep = (targetStep) => {
@@ -1082,9 +1094,10 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       return;
     }
     saveDraftLocally();
-    if (savePlanForStepAction({ mode, action: 'next' }).server) {
+    const plan = savePlanForStepAction({ mode, action: 'next' });
+    if (plan.server) {
       try {
-        await saveExistingProfile();
+        await saveExistingProfile(plan.saveMode);
       } catch {
         notify('自动保存设备画像失败，请确认本地 API 服务已启动。');
         return;
@@ -1110,7 +1123,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       const saved = await api(mode === 'create' ? '/projects/from-profile' : `/projects/${projectId}/profile`, {
         method: mode === 'create' ? 'POST' : 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mode === 'create' ? { profile: formalDraft } : formalDraft)
+        body: JSON.stringify(mode === 'create' ? { profile: formalDraft } : { profile: formalDraft, save_mode: 'final' })
       });
       if (mode === 'create') {
         await refreshProjects();
@@ -1269,7 +1282,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       <footer className="profile-navigation-footer">
         <button className="secondary-btn" disabled={!previousStep(navigationSteps, activeSection)} onClick={goBack}>上一步</button>
         <div className="profile-save-state">
-          <button className="secondary-btn" onClick={saveDraftLocally}>保存草稿</button>
+          <button className="secondary-btn" onClick={saveDraft}>保存草稿</button>
           {savedAt && <span>已保存 {savedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>}
         </div>
         {finalStep

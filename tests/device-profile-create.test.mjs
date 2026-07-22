@@ -80,6 +80,54 @@ test('creates a project, profile, and clinical evaluation task from a completed 
     const incompleteUpdate = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ basics: { productName: 'Incomplete' } }) });
     assert.equal(incompleteUpdate.status, 400);
 
+    const basicsOnlyDraft = {
+      basics: {
+        product_name: 'Basics-only saved draft',
+        generic_name: 'Draft device',
+        regulation: 'EU MDR',
+        eu_mdr_device_class: 'Class IIa',
+        eu_mdr_classification_rule: 'Rule 10'
+      }
+    };
+    const draftUpdate = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: basicsOnlyDraft, save_mode: 'draft' })
+    });
+    assert.equal(draftUpdate.status, 200);
+    assert.equal((await draftUpdate.json()).basics.product_name, 'Basics-only saved draft');
+
+    const missingDraftRegion = structuredClone(basicsOnlyDraft);
+    delete missingDraftRegion.basics.regulation;
+    const missingDraftRegionUpdate = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: missingDraftRegion, save_mode: 'draft' })
+    });
+    assert.equal(missingDraftRegionUpdate.status, 400);
+
+    const staleCrossMarketDraft = structuredClone(basicsOnlyDraft);
+    staleCrossMarketDraft.basics.hong_kong_device_class = 'Class II';
+    const staleCrossMarketUpdate = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: staleCrossMarketDraft, save_mode: 'draft' })
+    });
+    assert.equal(staleCrossMarketUpdate.status, 400);
+
+    const invalidOverrideDraft = {
+      basics: { regulation: 'FDA', united_states_fda_device_class: 'Class II' },
+      market: { legally_marketed_predicate_device: 'Yes', selected_submission_pathway: 'De Novo' }
+    };
+    const invalidOverrideUpdate = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: invalidOverrideDraft, save_mode: 'draft' })
+    });
+    assert.equal(invalidOverrideUpdate.status, 400);
+
+    const finalUpdate = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: basicsOnlyDraft, save_mode: 'final' })
+    });
+    assert.equal(finalUpdate.status, 400);
+
     for (const regulation of ['NMPA', 'FDA', '香港注册（MDACS）']) {
       const legacyResponse = await fetch(`${baseUrl}/projects/from-profile`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },

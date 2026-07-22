@@ -40,7 +40,8 @@ export function canVisitStep({ steps, targetStep, visited, missingByStep }) {
 export function savePlanForStepAction({ mode, action }) {
   return {
     local: true,
-    server: mode === 'edit' && action === 'next',
-    create: mode === 'create' && action === 'final'
+    server: mode === 'edit',
+    create: mode === 'create' && action === 'final',
+    saveMode: action === 'final' ? 'final' : 'draft'
   };
 }

@@ -1125,9 +1125,15 @@ app.put('/api/projects/:projectId/profile', async (req, res) => {
   const project = findActiveProjectOrRespond(db, req.params.projectId, res);
   if (!project) return;
   const existing = db.deviceProfiles.find((item) => item.projectId === project.id);
-  const selectedRegion = req.body.basics?.regulation || existing?.basics?.regulation || project.market;
-  const normalizedInput = normalizeMarketProfile({ ...req.body, basics: { ...(req.body.basics || {}), regulation: selectedRegion } });
-  const validation = validateMarketProfile(selectedRegion, normalizedInput);
+  const saveMode = req.body.save_mode || 'final';
+  if (!['draft', 'final'].includes(saveMode)) return res.status(400).json({ error: 'Unsupported profile save mode' });
+  const profileInput = req.body.profile || req.body;
+  if (saveMode === 'draft' && !profileInput.basics?.regulation) {
+    return res.status(400).json({ code: 'market_profile_validation_failed', missing: ['basics.regulation'], incompatible: [] });
+  }
+  const selectedRegion = profileInput.basics?.regulation || existing?.basics?.regulation || project.market;
+  const normalizedInput = normalizeMarketProfile({ ...profileInput, basics: { ...(profileInput.basics || {}), regulation: selectedRegion } });
+  const validation = validateMarketProfile(selectedRegion, normalizedInput, { saveMode });
   if (validation.code) return res.status(400).json(validation);
   const profile = {
     projectId: project.id,
@@ -1140,7 +1146,7 @@ app.put('/api/projects/:projectId/profile', async (req, res) => {
     db.deviceProfiles.push(profile);
   }
   Object.assign(project, profileProjectFields(profile));
-  event(db, 'profile.saved', `保存设备画像：${project.product}`, { projectId: project.id });
+  event(db, 'profile.saved', `保存设备画像：${project.product}`, { projectId: project.id, saveMode });
   await writeDb(db);
   res.json(existing || profile);
 });

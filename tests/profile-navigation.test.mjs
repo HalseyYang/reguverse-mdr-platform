@@ -65,8 +65,10 @@ test('canVisitStep permits the immediate future only after all preceding steps a
 });
 
 test('step save plans never create a project while advancing', () => {
-  assert.deepEqual(savePlanForStepAction({ mode: 'create', action: 'draft' }), { local: true, server: false, create: false });
-  assert.deepEqual(savePlanForStepAction({ mode: 'create', action: 'next' }), { local: true, server: false, create: false });
-  assert.deepEqual(savePlanForStepAction({ mode: 'edit', action: 'next' }), { local: true, server: true, create: false });
-  assert.deepEqual(savePlanForStepAction({ mode: 'create', action: 'final' }), { local: true, server: false, create: true });
+  assert.deepEqual(savePlanForStepAction({ mode: 'create', action: 'draft' }), { local: true, server: false, create: false, saveMode: 'draft' });
+  assert.deepEqual(savePlanForStepAction({ mode: 'create', action: 'next' }), { local: true, server: false, create: false, saveMode: 'draft' });
+  assert.deepEqual(savePlanForStepAction({ mode: 'edit', action: 'draft' }), { local: true, server: true, create: false, saveMode: 'draft' });
+  assert.deepEqual(savePlanForStepAction({ mode: 'edit', action: 'next' }), { local: true, server: true, create: false, saveMode: 'draft' });
+  assert.deepEqual(savePlanForStepAction({ mode: 'edit', action: 'final' }), { local: true, server: true, create: false, saveMode: 'final' });
+  assert.deepEqual(savePlanForStepAction({ mode: 'create', action: 'final' }), { local: true, server: false, create: true, saveMode: 'final' });
 });

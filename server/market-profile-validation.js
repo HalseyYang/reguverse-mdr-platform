@@ -1,12 +1,14 @@
 import { profileFor, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway, SUPPORTED_REGULATORY_REGIONS } from '../src/features/device-profile/market-profile-configurations.js';
 const populated = (value) => value !== undefined && value !== null && `${value}`.trim() !== '';
-export function validateMarketProfile(region, profile = {}) {
+export function validateMarketProfile(region, profile = {}, { saveMode = 'final' } = {}) {
   if (!SUPPORTED_REGULATORY_REGIONS.includes(region)) return { code: 'market_profile_validation_failed', missing: [], incompatible: ['basics.regulation'], unsupportedRegulatoryRegion: region };
   const config = profileFor(region, profile);
-  const missing = config.fields.filter((item) => item.required && !populated(profile?.[item.section]?.[item.name])).map((item) => item.name);
+  const missing = saveMode === 'final'
+    ? config.fields.filter((item) => item.required && !populated(profile?.[item.section]?.[item.name])).map((item) => item.name)
+    : [];
   if (region === 'FDA') {
     const recommended = recommendUnitedStatesFdaSubmissionPathway(profile);
-    if (recommended === 'Needs regulatory assessment') missing.push('fda_regulatory_pathway_assessment');
+    if (saveMode === 'final' && recommended === 'Needs regulatory assessment') missing.push('fda_regulatory_pathway_assessment');
     else if (populated(profile?.market?.selected_submission_pathway) && profile.market.selected_submission_pathway !== recommended && !populated(profile?.market?.united_states_fda_submission_pathway_override_reason)) missing.push('united_states_fda_submission_pathway_override_reason');
   }
   if (region === '香港注册（MDACS）') {
