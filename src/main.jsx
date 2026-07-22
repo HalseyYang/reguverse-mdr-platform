@@ -43,6 +43,7 @@ import {
 } from './features/hong-kong-registration/regulatory-options.js';
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
 import { profileFor, incompatiblePopulatedFieldsWithAliases, clearIncompatibleMarketFields, normalizeMarketProfile, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway, wizardSectionsFor } from './features/device-profile/market-profile-configurations.js';
+import { canVisitStep, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, savePlanForStepAction } from './features/device-profile/profile-navigation.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity },
@@ -879,6 +880,8 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   const [activeSection, setActiveSection] = useState('basics');
   const [draft, setDraft] = useState(profile || defaultDeviceProfile);
   const [dirty, setDirty] = useState(false);
+  const [visitedSteps, setVisitedSteps] = useState(['basics']);
+  const [savedAt, setSavedAt] = useState(null);
   const [candidateEdits, setCandidateEdits] = useState({});
   const [pendingRegionChange, setPendingRegionChange] = useState(null);
   const draftStorageKey = `reguverse-profile-draft-${mode === 'create' ? 'create' : projectId || 'unknown'}`;
@@ -891,6 +894,9 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       setDraft(normalizeMarketProfile(profile || defaultDeviceProfile));
     }
     setDirty(false);
+    setActiveSection('basics');
+    setVisitedSteps(['basics']);
+    setSavedAt(null);
   }, [profile?.projectId, profile?.updatedAt, mode, draftStorageKey]);
 
   useEffect(() => {
@@ -919,7 +925,11 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     };
   });
   const resolvedProfileSections = draft.basics?.regulation === 'EU MDR'
-    ? legacyResolvedProfileSections
+    ? legacyResolvedProfileSections.map((legacySection, index) => ({
+      ...legacySection,
+      id: selectedMarketProfile.steps[index]?.id || legacySection.id,
+      dataSectionId: legacySection.id
+    }))
     : wizardSectionsFor(draft.basics?.regulation, draft).map((step) => ({
       id: step.id,
       title: step.title,
@@ -939,6 +949,16 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   const hasHongKongClassificationMismatch = Boolean(
     recommendedHongKongClass && draft.basics?.hong_kong_device_class && recommendedHongKongClass !== draft.basics.hong_kong_device_class
   );
+  const navigationSteps = resolvedProfileSections.map(({ id, dataSectionId }) => ({ id, dataSectionId }));
+  const missingWithOverrides = hasHongKongClassificationMismatch && !String(draft.basics?.hong_kong_classification_override_reason || '').trim()
+    ? [...missing, { sectionId: 'basics', key: 'hong_kong_classification_override_reason', label: '类别调整理由', text: '器械基础 / 类别调整理由' }]
+    : missing;
+  const missingByStep = missingWithOverrides.reduce((groups, item) => {
+    const stepId = navigationStepIdForDataSection(navigationSteps, item.sectionId);
+    return { ...groups, [stepId]: [...(groups[stepId] || []), item] };
+  }, {});
+  const currentMissing = missingByStep[activeSection] || [];
+  const finalStep = isFinalStep(navigationSteps, activeSection);
 
   const updateField = (sectionId, key, value) => {
     if (sectionId === 'basics' && key === 'regulation') {
@@ -985,7 +1005,9 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     next.basics = { ...next.basics, regulation: pendingRegionChange.value };
     const normalizedNext = normalizeMarketProfile(next);
     setDraft(normalizedNext);
-    setActiveSection(profileFor(pendingRegionChange.value, normalizedNext).steps[0]?.id || 'basics');
+    const firstStep = profileFor(pendingRegionChange.value, normalizedNext).steps[0]?.id || 'basics';
+    setActiveSection(firstStep);
+    setVisitedSteps([firstStep]);
     setDirty(true);
     setPendingRegionChange(null);
   };
@@ -1024,14 +1046,58 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
 
   const saveDraftLocally = () => {
     localStorage.setItem(draftStorageKey, JSON.stringify(draft));
+    setSavedAt(new Date());
     setDirty(false);
     notify('画像草稿已保存到本机浏览器。');
   };
 
+  const saveExistingProfile = async () => {
+    await api(`/projects/${projectId}/profile`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(normalizeMarketProfile(draft))
+    });
+  };
+
+  const goToStep = (targetStep) => {
+    const result = canVisitStep({ steps: navigationSteps, targetStep, visited: visitedSteps, missingByStep });
+    if (!result.allowed) {
+      setActiveSection(result.blockedStep);
+      notify(`请先补齐当前步骤的 ${result.missing.length} 项必填字段。`);
+      return;
+    }
+    setActiveSection(targetStep);
+    setVisitedSteps((current) => [...new Set([...current, targetStep])]);
+  };
+
+  const goBack = () => {
+    const target = previousStep(navigationSteps, activeSection);
+    if (target) setActiveSection(target);
+  };
+
+  const advance = async () => {
+    const result = nextStep({ steps: navigationSteps, activeStep: activeSection, missingByStep, visited: visitedSteps });
+    if (result.action === 'missing') {
+      notify(`当前步骤还有 ${result.missing.length} 项必填字段缺失。`);
+      return;
+    }
+    saveDraftLocally();
+    if (savePlanForStepAction({ mode, action: 'next' }).server) {
+      try {
+        await saveExistingProfile();
+      } catch {
+        notify('自动保存设备画像失败，请确认本地 API 服务已启动。');
+        return;
+      }
+    }
+    setVisitedSteps(result.visited);
+    setActiveSection(result.nextStep);
+  };
+
   const saveProfile = async () => {
-    if (mode === 'create' && missing.length) {
-      notify(`还有 ${missing.length} 项必填字段缺失，请补齐后再创建项目。`);
-      setActiveSection(missing[0].sectionId);
+    if (missingWithOverrides.length) {
+      notify(`还有 ${missingWithOverrides.length} 项必填字段缺失，请补齐后再${mode === 'create' ? '创建项目' : '保存画像'}。`);
+      setActiveSection(navigationStepIdForDataSection(navigationSteps, missingWithOverrides[0].sectionId));
       return;
     }
     if (hasHongKongClassificationMismatch && !String(draft.basics?.hong_kong_classification_override_reason || '').trim()) {
@@ -1076,19 +1142,17 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
           <h2>{mode === 'create' ? '新建项目与设备画像' : '项目与设备画像'}</h2>
         </div>
         <div className="button-row">
-          <span className={missing.length ? 'status warn' : 'status ok'}>{missing.length ? `${missing.length} 项必填缺失` : '字段完整'}</span>
+          <span className={missingWithOverrides.length ? 'status warn' : 'status ok'}>{missingWithOverrides.length ? `${missingWithOverrides.length} 项必填缺失` : '字段完整'}</span>
           {dirty && <span className="status draft">未保存</span>}
-          <button className="secondary-btn" onClick={saveDraftLocally}>保存草稿</button>
           {mode === 'create' && <button className="secondary-btn" onClick={onCancel}>取消</button>}
-          <button className="primary-btn" onClick={saveProfile}><CheckCircle2 size={16} />{mode === 'create' ? '创建项目' : '保存画像'}</button>
         </div>
       </div>
       <div className="profile-layout">
         <div className="profile-steps">
           {resolvedProfileSections.map((item, index) => {
-            const hasMissing = item.fields.some(([key, , required, , , fieldSectionId]) => required && !String(draft[fieldSectionId || item.dataSectionId || item.id]?.[key] || '').trim());
+            const hasMissing = Boolean(missingByStep[item.id]?.length);
             return (
-              <button key={item.id} className={activeSection === item.id ? 'profile-step active' : 'profile-step'} onClick={() => setActiveSection(item.id)}>
+              <button key={item.id} className={activeSection === item.id ? 'profile-step active' : 'profile-step'} onClick={() => goToStep(item.id)}>
                 <span>{index + 1}</span>
                 <div>
                   <strong>{item.title}</strong>
@@ -1108,7 +1172,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
             {section.fields.map(([key, label, required, type, options, fieldSectionId]) => {
               const dataSectionId = fieldSectionId || section.dataSectionId || section.id;
               return (
-              <label className={type === 'textarea' ? 'profile-field wide' : 'profile-field'} key={key}>
+              <label className={`${type === 'textarea' ? 'profile-field wide' : 'profile-field'}${currentMissing.some((item) => item.key === key && item.sectionId === dataSectionId) ? ' missing' : ''}`} key={key}>
                 <span>{label}{required ? ' *' : ''}</span>
                 {type === 'select' ? (
                   <select value={draft[dataSectionId]?.[key] || ''} onChange={(event) => updateField(dataSectionId, key, event.target.value)}>
@@ -1127,7 +1191,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
               </label>
             );})}
             {hasHongKongClassificationMismatch && (
-              <label className="profile-field wide classification-warning">
+              <label className={`profile-field wide classification-warning${currentMissing.some((item) => item.key === 'hong_kong_classification_override_reason') ? ' missing' : ''}`}>
                 <span>类别调整理由 *</span>
                 <p>系统根据香港分类依据推荐 {recommendedHongKongClass}，当前选择为 {draft.basics?.hong_kong_device_class}。允许修改，但理由为必填项。</p>
                 <textarea
@@ -1196,12 +1260,22 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
           )}
         </div>
       )}
-      {missing.length > 0 && (
+      {missingWithOverrides.length > 0 && (
         <div className="missing-list">
           <strong>必填字段缺失</strong>
-          {missing.slice(0, 8).map((item) => <span key={item.text}>{item.text}</span>)}
+          {missingWithOverrides.slice(0, 8).map((item) => <span key={item.text}>{item.text}</span>)}
         </div>
       )}
+      <footer className="profile-navigation-footer">
+        <button className="secondary-btn" disabled={!previousStep(navigationSteps, activeSection)} onClick={goBack}>上一步</button>
+        <div className="profile-save-state">
+          <button className="secondary-btn" onClick={saveDraftLocally}>保存草稿</button>
+          {savedAt && <span>已保存 {savedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>}
+        </div>
+        {finalStep
+          ? <button className="primary-btn" onClick={saveProfile}><CheckCircle2 size={16} />{mode === 'create' ? '创建项目' : '保存画像'}</button>
+          : <button className="primary-btn" onClick={advance}>下一步<ChevronRight size={16} /></button>}
+      </footer>
     </section>
   );
 }
