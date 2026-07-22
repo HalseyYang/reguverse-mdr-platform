@@ -12,6 +12,8 @@ import {
   restoreProject,
   softDeleteProject
 } from './server/project-lifecycle.js';
+import { validateMarketProfile } from './server/market-profile-validation.js';
+import { profileFor } from './src/features/device-profile/market-profile-configurations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, 'data');
@@ -185,6 +187,16 @@ const clinicalEvaluationDocuments = [
 ];
 
 const taskTemplates = [
+  {
+    id: 'nmpa-registration',
+    title: 'NMPA Registration',
+    description: 'NMPA registration dossier preparation task.'
+  },
+  {
+    id: 'fda-market-submission',
+    title: 'FDA Market Submission',
+    description: 'FDA premarket submission preparation task; establishment registration and device listing are not product approvals.'
+  },
   {
     id: 'hong-kong-document-revision',
     title: '香港注册文件修订',
@@ -1003,11 +1015,17 @@ app.post('/api/projects', async (req, res) => {
 
 app.post('/api/projects/from-profile', async (req, res) => {
   const profileInput = req.body.profile || req.body;
-  const missing = missingProfileFields(profileInput);
+  const selectedRegion = profileInput.basics?.regulation || 'EU MDR';
+  const usesMarketContract = Object.values(profileInput).some((section) => section && typeof section === 'object' && Object.keys(section).some((key) => key.includes('_')));
+  if (usesMarketContract) {
+    const validation = validateMarketProfile(selectedRegion, profileInput);
+    if (validation.code) return res.status(400).json(validation);
+  }
+  const missing = usesMarketContract ? [] : missingProfileFields(profileInput);
   if (missing.length) {
     return res.status(400).json({ error: 'Missing required profile fields', missing });
   }
-  if (missingHongKongClassificationOverrideReason(profileInput)) {
+  if (!usesMarketContract && missingHongKongClassificationOverrideReason(profileInput)) {
     return res.status(400).json({ error: 'Classification override reason is required' });
   }
 
@@ -1027,9 +1045,12 @@ app.post('/api/projects/from-profile', async (req, res) => {
   };
   db.projects.unshift(project);
   db.deviceProfiles.push(profile);
-  const task = profileInput.basics?.regulation === '香港注册（MDACS）'
+  const templateId = profileFor(selectedRegion, profileInput).taskTemplateId;
+  const task = templateId === 'hong-kong-document-revision'
     ? initializeHongKongDocumentRevisionTask(db, id)
-    : initializeClinicalEvaluationWorkflow(db, id);
+    : templateId === 'clinical-evaluation'
+      ? initializeClinicalEvaluationWorkflow(db, id)
+      : createTaskFromTemplate(db, id, templateId);
   event(db, 'project.created_from_profile', `从设备画像创建项目：${project.title}`, { projectId: id });
   await writeDb(db);
   res.status(201).json({ project, profile, tasks: [task] });
@@ -1110,6 +1131,12 @@ app.put('/api/projects/:projectId/profile', async (req, res) => {
   const db = await readDb();
   const project = findActiveProjectOrRespond(db, req.params.projectId, res);
   if (!project) return;
+  const selectedRegion = req.body.basics?.regulation || project.market || 'EU MDR';
+  const usesMarketContract = Object.values(req.body).some((section) => section && typeof section === 'object' && Object.keys(section).some((key) => key.includes('_')));
+  if (usesMarketContract) {
+    const validation = validateMarketProfile(selectedRegion, req.body);
+    if (validation.code) return res.status(400).json(validation);
+  }
   const existing = db.deviceProfiles.find((item) => item.projectId === project.id);
   const profile = {
     projectId: project.id,

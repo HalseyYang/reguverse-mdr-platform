@@ -42,6 +42,7 @@ import {
   regulatoryRegionOptions
 } from './features/hong-kong-registration/regulatory-options.js';
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
+import { profileFor, incompatiblePopulatedFields } from './features/device-profile/market-profile-configurations.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity },
@@ -879,6 +880,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   const [draft, setDraft] = useState(profile || defaultDeviceProfile);
   const [dirty, setDirty] = useState(false);
   const [candidateEdits, setCandidateEdits] = useState({});
+  const [pendingRegionChange, setPendingRegionChange] = useState(null);
   const draftStorageKey = `reguverse-profile-draft-${mode === 'create' ? 'create' : projectId || 'unknown'}`;
 
   useEffect(() => {
@@ -896,7 +898,8 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   }, [extraction?.id]);
 
   const regulatoryFieldConfiguration = fieldConfigurationForRegulatoryRegion(draft.basics?.regulation);
-  const resolvedProfileSections = profileSections.map((profileSection) => {
+  const selectedMarketProfile = profileFor(draft.basics?.regulation, draft);
+  const legacyResolvedProfileSections = profileSections.map((profileSection) => {
     if (profileSection.id !== 'basics') return profileSection;
     return {
       ...profileSection,
@@ -915,8 +918,20 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       })
     };
   });
+  const resolvedProfileSections = draft.basics?.regulation === 'EU MDR'
+    ? legacyResolvedProfileSections
+    : selectedMarketProfile.steps.map((step) => ({
+      id: step.id,
+      title: step.title,
+      hint: '',
+      fields: (step.id === 'basics' ? [{ section: 'basics', name: 'regulation', label: '法规区域', required: true, type: 'select', options: regulatoryRegionOptions }, ...selectedMarketProfile.fields] : selectedMarketProfile.fields)
+        .filter((marketField) => marketField.section === step.id || (step.id === 'confirmation' && marketField.section === 'confirmations'))
+        .map((marketField) => [marketField.name, marketField.label, marketField.required, marketField.type === 'select' ? 'select' : 'input', marketField.options])
+    }));
   const section = resolvedProfileSections.find((item) => item.id === activeSection) || resolvedProfileSections[0];
-  const missing = getMissingProfileFields(draft);
+  const missing = (draft.basics?.regulation === 'EU MDR' ? getMissingProfileFields(draft) : resolvedProfileSections.flatMap((profileSection) => profileSection.fields
+    .filter(([key, , required]) => required && !String(draft[profileSection.id]?.[key] || '').trim())
+    .map(([key, label]) => ({ sectionId: profileSection.id, key, label, text: `${profileSection.title} / ${label}` }))));
   const recommendedHongKongClass = draft.basics?.regulation === HONG_KONG_REGULATORY_REGION
     ? recommendHongKongDeviceClass(draft.basics?.classificationRule).recommendedClass
     : '';
@@ -925,6 +940,13 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   );
 
   const updateField = (sectionId, key, value) => {
+    if (sectionId === 'basics' && key === 'regulation') {
+      const incompatible = incompatiblePopulatedFields(draft.basics?.regulation, value, draft);
+      if (incompatible.length) {
+        setPendingRegionChange({ value, incompatible });
+        return;
+      }
+    }
     setDraft((current) => {
       const nextSection = { ...(current[sectionId] || {}), [key]: value };
       if (sectionId === 'basics' && key === 'regulation') {
@@ -940,6 +962,17 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       return { ...current, [sectionId]: nextSection };
     });
     setDirty(true);
+  };
+
+  const confirmRegionChange = () => {
+    if (!pendingRegionChange) return;
+    const next = structuredClone(draft);
+    for (const item of pendingRegionChange.incompatible) delete next[item.section]?.[item.name];
+    next.basics = { ...next.basics, regulation: pendingRegionChange.value };
+    setDraft(next);
+    setActiveSection(selectedMarketProfile.steps[0]?.id || 'basics');
+    setDirty(true);
+    setPendingRegionChange(null);
   };
 
   const candidateKey = (candidate) => `${candidate.sectionId}.${candidate.fieldKey}`;
@@ -1016,6 +1049,11 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
 
   return (
     <section className="profile-builder">
+      {pendingRegionChange && <div className="panel market-switch-dialog" role="dialog" aria-modal="true">
+        <h3>切换市场将清除以下市场专属字段</h3>
+        <ul>{pendingRegionChange.incompatible.map((item) => <li key={`${item.section}.${item.name}`}>{item.label}</li>)}</ul>
+        <div className="button-row"><button className="secondary-btn" onClick={() => setPendingRegionChange(null)}>取消</button><button className="primary-btn" onClick={confirmRegionChange}>确认切换</button></div>
+      </div>}
       <div className="panel-head">
         <div>
           <span className="eyebrow">Device profile</span>

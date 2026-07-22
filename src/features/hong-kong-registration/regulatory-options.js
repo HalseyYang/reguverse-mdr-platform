@@ -1,5 +1,5 @@
 export const HONG_KONG_REGULATORY_REGION = '香港注册（MDACS）';
-export const regulatoryRegionOptions = ['EU MDR', 'NMPA', 'FDA', 'UK MDR', HONG_KONG_REGULATORY_REGION];
+export const regulatoryRegionOptions = ['EU MDR', 'NMPA', 'FDA', HONG_KONG_REGULATORY_REGION];
 export const euMdrDeviceClasses = ['Class I', 'Class Is', 'Class Im', 'Class Ir', 'Class IIa', 'Class IIb', 'Class III', 'Not determined'];
 export const euMdrClassificationRules = [
   'Rule 1 - Non-invasive devices',
