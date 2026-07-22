@@ -34,6 +34,12 @@ import {
   Workflow
 } from 'lucide-react';
 import './styles.css';
+import {
+  HONG_KONG_REGULATORY_REGION,
+  fieldConfigurationForRegulatoryRegion,
+  recommendHongKongDeviceClass,
+  regulatoryRegionOptions
+} from './features/hong-kong-registration/regulatory-options.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity },
@@ -201,7 +207,7 @@ const profileSections = [
     fields: [
       ['productName', '产品名称', true, 'input'],
       ['genericName', '通用名/器械类型', true, 'input'],
-      ['regulation', '法规区域', true, 'select', ['EU MDR', 'NMPA', 'FDA', 'UK MDR']],
+      ['regulation', '法规区域', true, 'select', regulatoryRegionOptions],
       ['deviceClass', '器械类别', true, 'select', euMdrDeviceClasses],
       ['classificationRule', '分类规则', true, 'select', euMdrClassificationRules]
     ]
@@ -355,7 +361,7 @@ const apiDomains = [
   ['/api/v1/llm', 'LLM健康检查、配置、对话生成']
 ];
 
-const API_BASE = 'http://127.0.0.1:8787/api';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8787/api';
 
 async function api(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, options);
@@ -708,7 +714,7 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
           <div>
             <span className="eyebrow">{creatingProfile ? 'Create from profile' : 'Product description'}</span>
             <h2>{creatingProfile ? '新建项目与设备画像' : selectedProject.title}</h2>
-            <p>{creatingProfile ? '完成必填字段后，系统会创建项目、设备画像和初始 Clinical Evaluation 任务。' : `${selectedProject.manufacturer} · ${selectedProject.market} · ${selectedProject.deviceClass} · Digital Therapeutic / SaMD`}</p>
+            <p>{creatingProfile ? '完成必填字段后，系统会创建项目、设备画像和与法规区域对应的初始任务。' : `${selectedProject.manufacturer} · ${selectedProject.market} · ${selectedProject.deviceClass} · Digital Therapeutic / SaMD`}</p>
           </div>
           <div className="button-row">
             <input className="hidden-file" ref={fileInput} type="file" onChange={uploadContextFile} />
@@ -861,17 +867,50 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     setCandidateEdits({});
   }, [extraction?.id]);
 
-  const section = profileSections.find((item) => item.id === activeSection) || profileSections[0];
+  const regulatoryFieldConfiguration = fieldConfigurationForRegulatoryRegion(draft.basics?.regulation);
+  const resolvedProfileSections = profileSections.map((profileSection) => {
+    if (profileSection.id !== 'basics') return profileSection;
+    return {
+      ...profileSection,
+      fields: profileSection.fields.map((field) => {
+        if (field[0] === 'deviceClass') return [...field.slice(0, 4), regulatoryFieldConfiguration.deviceClasses];
+        if (field[0] === 'classificationRule') {
+          return [
+            field[0],
+            regulatoryFieldConfiguration.classificationRuleLabel,
+            field[2],
+            field[3],
+            regulatoryFieldConfiguration.classificationBasisOptions
+          ];
+        }
+        return field;
+      })
+    };
+  });
+  const section = resolvedProfileSections.find((item) => item.id === activeSection) || resolvedProfileSections[0];
   const missing = getMissingProfileFields(draft);
+  const recommendedHongKongClass = draft.basics?.regulation === HONG_KONG_REGULATORY_REGION
+    ? recommendHongKongDeviceClass(draft.basics?.classificationRule).recommendedClass
+    : '';
+  const hasHongKongClassificationMismatch = Boolean(
+    recommendedHongKongClass && draft.basics?.deviceClass && recommendedHongKongClass !== draft.basics.deviceClass
+  );
 
   const updateField = (sectionId, key, value) => {
-    setDraft((current) => ({
-      ...current,
-      [sectionId]: {
-        ...(current[sectionId] || {}),
-        [key]: value
+    setDraft((current) => {
+      const nextSection = { ...(current[sectionId] || {}), [key]: value };
+      if (sectionId === 'basics' && key === 'regulation') {
+        const configuration = fieldConfigurationForRegulatoryRegion(value);
+        nextSection.classificationRule = '';
+        nextSection.deviceClass = configuration.deviceClasses[0] || '';
+        nextSection.classificationMismatchReason = '';
       }
-    }));
+      if (sectionId === 'basics' && key === 'classificationRule' && current.basics?.regulation === HONG_KONG_REGULATORY_REGION) {
+        nextSection.deviceClass = recommendHongKongDeviceClass(value).recommendedClass;
+        nextSection.classificationMismatchReason = '';
+      }
+      return { ...current, [sectionId]: nextSection };
+    });
     setDirty(true);
   };
 
@@ -919,6 +958,11 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       setActiveSection(missing[0].sectionId);
       return;
     }
+    if (hasHongKongClassificationMismatch && !String(draft.basics?.classificationMismatchReason || '').trim()) {
+      notify('器械类别与系统推荐不一致，请填写修改类别的理由后再继续。');
+      setActiveSection('basics');
+      return;
+    }
     try {
       const saved = await api(mode === 'create' ? '/projects/from-profile' : `/projects/${projectId}/profile`, {
         method: mode === 'create' ? 'POST' : 'PUT',
@@ -959,7 +1003,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       </div>
       <div className="profile-layout">
         <div className="profile-steps">
-          {profileSections.map((item, index) => {
+          {resolvedProfileSections.map((item, index) => {
             const hasMissing = item.fields.some(([key, , required]) => required && !String(draft[item.id]?.[key] || '').trim());
             return (
               <button key={item.id} className={activeSection === item.id ? 'profile-step active' : 'profile-step'} onClick={() => setActiveSection(item.id)}>
@@ -984,7 +1028,11 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
                 {type === 'select' ? (
                   <select value={draft[section.id]?.[key] || ''} onChange={(event) => updateField(section.id, key, event.target.value)}>
                     <option value="">请选择</option>
-                    {options.map((option) => <option key={option} value={option}>{option}</option>)}
+                    {options.map((option) => {
+                      const optionValue = typeof option === 'string' ? option : option.value;
+                      const optionLabel = typeof option === 'string' ? option : option.label;
+                      return <option key={optionValue} value={optionValue}>{optionLabel}</option>;
+                    })}
                   </select>
                 ) : type === 'textarea' ? (
                   <textarea value={draft[section.id]?.[key] || ''} onChange={(event) => updateField(section.id, key, event.target.value)} />
@@ -993,6 +1041,16 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
                 )}
               </label>
             ))}
+            {hasHongKongClassificationMismatch && (
+              <label className="profile-field wide classification-warning">
+                <span>类别调整理由 *</span>
+                <p>系统根据香港分类依据推荐 {recommendedHongKongClass}，当前选择为 {draft.basics?.deviceClass}。允许修改，但需记录理由。</p>
+                <textarea
+                  value={draft.basics?.classificationMismatchReason || ''}
+                  onChange={(event) => updateField('basics', 'classificationMismatchReason', event.target.value)}
+                />
+              </label>
+            )}
           </div>
         </div>
         <aside className="profile-summary">

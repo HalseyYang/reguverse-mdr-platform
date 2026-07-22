@@ -153,6 +153,11 @@ const clinicalEvaluationDocuments = [
 
 const taskTemplates = [
   {
+    id: 'hong-kong-document-revision',
+    title: '香港注册文件修订',
+    description: 'Revise an uploaded source document for Hong Kong MDACS submission and produce an editable DOCX draft.'
+  },
+  {
     id: 'clinical-evaluation',
     title: 'Clinical Evaluation',
     description: 'EU MDR clinical evaluation workflow with 10 steps and CER/CEP/DCR outputs.'
@@ -231,13 +236,36 @@ function missingProfileFields(profile = {}) {
 
 function profileProjectFields(profile) {
   const product = profile.basics?.productName || 'New Device';
+  const isHongKongRegistration = profile.basics?.regulation === '香港注册（MDACS）';
   return {
-    title: `EU MDR CER - ${product}`,
+    title: isHongKongRegistration ? `香港注册 - ${product}` : `EU MDR CER - ${product}`,
     product,
     market: profile.basics?.regulation || 'EU MDR',
     deviceClass: profile.basics?.deviceClass || 'Class IIa',
     manufacturer: profile.company?.manufacturer || 'New Manufacturer'
   };
+}
+
+const hongKongRecommendedClasses = {
+  RULE_2_NON_INVASIVE: 'Class II',
+  RULE_5_INVASIVE: 'Class II',
+  RULE_6_SURGICALLY_INVASIVE_TRANSIENT: 'Class II',
+  RULE_7_SURGICALLY_INVASIVE_SHORT_TERM: 'Class III',
+  RULE_8_IMPLANTABLE_LONG_TERM: 'Class IV',
+  RULE_9_ACTIVE_THERAPEUTIC: 'Class II',
+  RULE_10_ACTIVE_DIAGNOSTIC: 'Class II',
+  RULE_12_OTHER_ACTIVE: 'Class II'
+};
+
+function missingHongKongClassificationOverrideReason(profile = {}) {
+  if (profile.basics?.regulation !== '香港注册（MDACS）') return false;
+  const recommendedClass = hongKongRecommendedClasses[profile.basics?.classificationRule];
+  const isOverride = recommendedClass && recommendedClass !== profile.basics?.deviceClass;
+  return Boolean(isOverride && !String(profile.basics?.classificationMismatchReason || '').trim());
+}
+
+function initializeHongKongDocumentRevisionTask(db, projectId) {
+  return createTaskFromTemplate(db, projectId, 'hong-kong-document-revision');
 }
 
 function initializeClinicalEvaluationWorkflow(db, projectId) {
@@ -888,6 +916,9 @@ app.post('/api/projects/from-profile', async (req, res) => {
   if (missing.length) {
     return res.status(400).json({ error: 'Missing required profile fields', missing });
   }
+  if (missingHongKongClassificationOverrideReason(profileInput)) {
+    return res.status(400).json({ error: 'Classification override reason is required' });
+  }
 
   const db = await readDb();
   const id = `project-${Date.now()}`;
@@ -905,7 +936,9 @@ app.post('/api/projects/from-profile', async (req, res) => {
   };
   db.projects.unshift(project);
   db.deviceProfiles.push(profile);
-  const task = initializeClinicalEvaluationWorkflow(db, id);
+  const task = profileInput.basics?.regulation === '香港注册（MDACS）'
+    ? initializeHongKongDocumentRevisionTask(db, id)
+    : initializeClinicalEvaluationWorkflow(db, id);
   event(db, 'project.created_from_profile', `从设备画像创建项目：${project.title}`, { projectId: id });
   await writeDb(db);
   res.status(201).json({ project, profile, tasks: [task] });
