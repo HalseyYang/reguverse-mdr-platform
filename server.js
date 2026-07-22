@@ -4,6 +4,14 @@ import fs from 'fs/promises';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  listActiveProjects,
+  listDeletedProjects,
+  purgeExpiredProjects,
+  purgeProject,
+  restoreProject,
+  softDeleteProject
+} from './server/project-lifecycle.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, 'data');
@@ -203,6 +211,15 @@ async function readDb() {
 
 async function writeDb(db) {
   await fs.writeFile(dbPath, JSON.stringify(db, null, 2));
+}
+
+async function removeStoredUploads(storedNames = []) {
+  await Promise.all(storedNames.map(async (storedName) => {
+    if (!storedName || path.basename(storedName) !== storedName) return;
+    const target = path.resolve(uploadDir, storedName);
+    if (path.dirname(target) !== path.resolve(uploadDir)) return;
+    await fs.rm(target, { force: true });
+  }));
 }
 
 function event(db, type, message, meta = {}) {
@@ -886,8 +903,19 @@ app.post('/api/profile-extractions/preview', upload.single('file'), async (req, 
 });
 
 app.get('/api/projects', async (req, res) => {
+  let db = await readDb();
+  const expired = purgeExpiredProjects(db, new Date());
+  if (expired.purgedProjectIds.length) {
+    db = expired.db;
+    await writeDb(db);
+    await removeStoredUploads(expired.uploadReferences);
+  }
+  res.json(listActiveProjects(db));
+});
+
+app.get('/api/projects/deleted', async (req, res) => {
   const db = await readDb();
-  res.json(db.projects);
+  res.json(listDeletedProjects(db));
 });
 
 app.post('/api/projects', async (req, res) => {
@@ -942,6 +970,43 @@ app.post('/api/projects/from-profile', async (req, res) => {
   event(db, 'project.created_from_profile', `从设备画像创建项目：${project.title}`, { projectId: id });
   await writeDb(db);
   res.status(201).json({ project, profile, tasks: [task] });
+});
+
+app.delete('/api/projects/:projectId', async (req, res) => {
+  const db = await readDb();
+  try {
+    const result = softDeleteProject(db, req.params.projectId, new Date());
+    event(result.db, 'project.deleted', `项目移入回收区：${result.project.title}`, { projectId: result.project.id });
+    await writeDb(result.db);
+    res.json({ project: result.project, fileCount: result.fileCount, deletedAt: result.project.deletedAt, purgeAt: result.project.purgeAt });
+  } catch (error) {
+    res.status(404).json({ error: error.message });
+  }
+});
+
+app.post('/api/projects/:projectId/restore', async (req, res) => {
+  const db = await readDb();
+  try {
+    const result = restoreProject(db, req.params.projectId);
+    event(result.db, 'project.restored', `恢复项目：${result.project.title}`, { projectId: result.project.id });
+    await writeDb(result.db);
+    res.json({ project: result.project, fileCount: result.fileCount, deletedAt: null, purgeAt: null });
+  } catch (error) {
+    res.status(404).json({ error: error.message });
+  }
+});
+
+app.delete('/api/projects/:projectId/permanent', async (req, res) => {
+  const db = await readDb();
+  try {
+    const result = purgeProject(db, req.params.projectId);
+    await writeDb(result.db);
+    await removeStoredUploads(result.uploadReferences);
+    res.json({ project: result.project, fileCount: result.fileCount, deletedAt: result.project.deletedAt, purgeAt: result.project.purgeAt });
+  } catch (error) {
+    const status = error.message.startsWith('Project not found') ? 404 : 409;
+    res.status(status).json({ error: error.message });
+  }
 });
 
 app.get('/api/projects/:projectId', async (req, res) => {

@@ -28,6 +28,7 @@ import {
   ShieldCheck,
   Sparkles,
   SquarePen,
+  Trash2,
   Upload,
   UserRound,
   UsersRound,
@@ -40,10 +41,10 @@ import {
   recommendHongKongDeviceClass,
   regulatoryRegionOptions
 } from './features/hong-kong-registration/regulatory-options.js';
+import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity },
-  { id: 'projects', label: '项目与任务', icon: Workflow },
   { id: 'documents', label: '文档生成', icon: Files },
   { id: 'knowledge', label: '法规知识库', icon: Library },
   { id: 'tools', label: 'AI 工具', icon: Sparkles },
@@ -371,6 +372,7 @@ async function api(path, options = {}) {
 
 function App() {
   const [active, setActive] = useState('dashboard');
+  const [projectsExpanded, setProjectsExpanded] = useState(true);
   const [projectList, setProjectList] = useState(seedProjects);
   const [projectDetail, setProjectDetail] = useState(null);
   const [apiStatus, setApiStatus] = useState('connecting');
@@ -419,11 +421,12 @@ function App() {
 
   const startProfileCreate = () => {
     setCreatingProfile(true);
-    setActive('projects');
+    setActive('project-create');
     notify('已进入新建项目画像：请先完成7步画像，再创建项目。');
   };
 
-  const ActiveIcon = navItems.find((item) => item.id === active)?.icon || Activity;
+  const ActiveIcon = active.startsWith('project') || active === 'projects' ? Workflow : navItems.find((item) => item.id === active)?.icon || Activity;
+  const activeTitle = active === 'project-management' ? '项目管理' : active === 'project-create' ? '新建项目' : active === 'projects' ? '项目详情' : navItems.find((item) => item.id === active)?.label;
 
   return (
     <div className="web-app">
@@ -442,6 +445,13 @@ function App() {
               <span>{label}</span>
             </button>
           ))}
+          <ProjectNavGroup
+            active={active}
+            expanded={projectsExpanded}
+            onToggle={() => setProjectsExpanded((value) => !value)}
+            onManage={() => { setCreatingProfile(false); setActive('project-management'); }}
+            onCreate={startProfileCreate}
+          />
         </nav>
         <div className="tenant-card">
           <Building2 size={18} />
@@ -458,7 +468,7 @@ function App() {
             <ActiveIcon size={22} />
             <div>
               <span>Regulatory workspace</span>
-              <h1>{navItems.find((item) => item.id === active)?.label}</h1>
+              <h1>{activeTitle}</h1>
             </div>
           </div>
           <div className="top-actions">
@@ -474,6 +484,8 @@ function App() {
         <section className="content">
           {notice && <Notice message={`${apiStatus === 'connected' ? 'API已连接' : apiStatus === 'offline' ? 'API离线' : 'API连接中'} · ${notice}`} onClose={() => setNotice('')} />}
           {active === 'dashboard' && <Dashboard projects={projectList} selectedProject={selectedProject} setSelectedProject={setSelectedProject} go={go} notify={notify} refreshProjects={refreshProjects} startProfileCreate={startProfileCreate} />}
+          {active === 'project-management' && <ProjectManagement api={api} projects={projectList} onRefresh={refreshProjects} notify={notify} onEnter={(project) => { setCreatingProfile(false); setSelectedProject(project); setActive('projects'); }} />}
+          {active === 'project-create' && <Projects projects={projectList} selectedProject={selectedProject} setSelectedProject={setSelectedProject} selectedStep={selectedStep} setSelectedStep={setSelectedStep} notify={notify} detail={projectDetail} refreshDetail={refreshDetail} refreshProjects={refreshProjects} creatingProfile={true} setCreatingProfile={setCreatingProfile} startProfileCreate={startProfileCreate} />}
           {active === 'projects' && <Projects projects={projectList} selectedProject={selectedProject} setSelectedProject={setSelectedProject} selectedStep={selectedStep} setSelectedStep={setSelectedStep} notify={notify} detail={projectDetail} refreshDetail={refreshDetail} refreshProjects={refreshProjects} creatingProfile={creatingProfile} setCreatingProfile={setCreatingProfile} startProfileCreate={startProfileCreate} />}
           {active === 'documents' && <Documents notify={notify} selectedProject={selectedProject} detail={projectDetail} refreshDetail={refreshDetail} />}
           {active === 'knowledge' && <Knowledge />}
@@ -689,8 +701,18 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
     await refreshDetail(project.id);
   };
 
+  const deleteProject = async () => {
+    const fileCount = detail?.files?.length || 0;
+    const impact = `${selectedProject.title}\n关联文件：${fileCount} 个\n项目将移入已删除项目并保留 30 天；期间可恢复，期满后项目关联数据与文件引用将永久清除。`;
+    if (!window.confirm(`确认删除项目？\n\n${impact}`)) return;
+    await api(`/projects/${selectedProject.id}`, { method: 'DELETE' });
+    await refreshProjects();
+    setCreatingProfile(false);
+    notify(`项目已移入回收区：${selectedProject.title}`);
+  };
+
   return (
-    <div className="workspace-grid">
+    <div className="project-detail-layout">
       <aside className="left-panel">
         <div className="panel-head compact">
           <h2>项目</h2>
@@ -722,6 +744,7 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
             {creatingProfile && <button className="secondary-btn" onClick={() => createFileInput.current?.click()}><Upload size={16} />上传文件识别</button>}
             {!creatingProfile && <button className="secondary-btn" onClick={() => fileInput.current?.click()}><Upload size={16} />上传上下文文件</button>}
             {!creatingProfile && <button className="primary-btn" onClick={() => setShowTaskPicker((value) => !value)}><Plus size={16} />Add Task</button>}
+            {!creatingProfile && <button className="danger-btn" onClick={deleteProject}><Trash2 size={16} />删除项目</button>}
           </div>
         </div>
         {!creatingProfile && showTaskPicker && (
