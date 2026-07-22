@@ -7,7 +7,9 @@ import {
   incompatiblePopulatedFields,
   recommendHongKongDeviceClassForProfile,
   recommendUnitedStatesFdaSubmissionPathway,
-  normalizeMarketProfile
+  normalizeMarketProfile,
+  wizardSectionsFor,
+  clearIncompatibleMarketFields
 } from '../src/features/device-profile/market-profile-configurations.js';
 import { validateMarketProfile } from '../server/market-profile-validation.js';
 import {
@@ -29,6 +31,25 @@ test('unknown regulatory regions never fall back to EU MDR', () => {
   const result = validateMarketProfile('UK MDR', completeEu);
   assert.equal(result.code, 'market_profile_validation_failed');
   assert.ok(result.incompatible.includes('basics.regulation'));
+});
+
+test('wizard confirmation step reads and writes the confirmations section explicitly', () => {
+  const sections = wizardSectionsFor('FDA', completeFdaProfile());
+  const confirmation = sections.find((section) => section.id === 'confirmation');
+  assert.equal(confirmation.dataSectionId, 'confirmations');
+  assert.ok(confirmation.fields.some((field) => field.name === 'status' && field.sectionId === 'confirmations'));
+});
+
+test('EU to Hong Kong switch clears formal and legacy EU fields without allowing them to revive', () => {
+  const legacy = normalizeMarketProfile({ basics: { productName: 'Shared', genericName: 'Generic', regulation: 'EU MDR', deviceClass: 'Class IIa', classificationRule: 'Rule 10' }, scope: { intendedUse: 'Use', indications: 'Indication', targetPopulation: 'Adults', intendedUsers: 'Clinicians', operatingPrinciple: 'Sensor' }, market: { ceScenario: 'Initial' }, company: { manufacturer: 'Acme', manufacturerAddress: 'Berlin' }, pathway: { evaluationPathway: 'Clinical trial route' }, scopeSettings: { databases: 'PubMed' }, confirmations: { status: 'draft' } });
+  const cleared = clearIncompatibleMarketFields('EU MDR', '香港注册（MDACS）', legacy);
+  assert.equal(cleared.basics.product_name, 'Shared');
+  for (const key of ['deviceClass', 'classificationRule', 'eu_mdr_device_class', 'eu_mdr_classification_rule']) assert.equal(cleared.basics[key], undefined);
+  assert.equal(cleared.market.ceScenario, undefined);
+  assert.equal(cleared.pathway.evaluationPathway, undefined);
+  assert.equal(cleared.scopeSettings, undefined);
+  const switchedBack = normalizeMarketProfile({ ...cleared, basics: { ...cleared.basics, regulation: 'EU MDR' } });
+  assert.equal(switchedBack.basics.eu_mdr_device_class, '');
 });
 
 test('normalizes a complete legacy EU profile into the formal contract without losing values', () => {

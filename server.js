@@ -13,7 +13,7 @@ import {
   softDeleteProject
 } from './server/project-lifecycle.js';
 import { validateMarketProfile } from './server/market-profile-validation.js';
-import { profileFor } from './src/features/device-profile/market-profile-configurations.js';
+import { normalizeMarketProfile, profileFor } from './src/features/device-profile/market-profile-configurations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, 'data');
@@ -1018,7 +1018,7 @@ app.post('/api/projects', async (req, res) => {
 
 app.post('/api/projects/from-profile', async (req, res) => {
   const profileInput = req.body.profile || req.body;
-  const selectedRegion = profileInput.basics?.regulation || 'EU MDR';
+  const selectedRegion = profileInput.basics?.regulation;
   const validation = validateMarketProfile(selectedRegion, profileInput);
   if (validation.code) return res.status(400).json(validation);
 
@@ -1124,16 +1124,14 @@ app.put('/api/projects/:projectId/profile', async (req, res) => {
   const db = await readDb();
   const project = findActiveProjectOrRespond(db, req.params.projectId, res);
   if (!project) return;
-  const selectedRegion = req.body.basics?.regulation || project.market || 'EU MDR';
-  const usesMarketContract = Object.values(req.body).some((section) => section && typeof section === 'object' && Object.keys(section).some((key) => key.includes('_')));
-  if (usesMarketContract) {
-    const validation = validateMarketProfile(selectedRegion, req.body);
-    if (validation.code) return res.status(400).json(validation);
-  }
   const existing = db.deviceProfiles.find((item) => item.projectId === project.id);
+  const selectedRegion = req.body.basics?.regulation || existing?.basics?.regulation || project.market;
+  const normalizedInput = normalizeMarketProfile({ ...req.body, basics: { ...(req.body.basics || {}), regulation: selectedRegion } });
+  const validation = validateMarketProfile(selectedRegion, normalizedInput);
+  if (validation.code) return res.status(400).json(validation);
   const profile = {
     projectId: project.id,
-    ...req.body,
+    ...normalizedInput,
     updatedAt: new Date().toISOString()
   };
   if (existing) {
@@ -1141,10 +1139,7 @@ app.put('/api/projects/:projectId/profile', async (req, res) => {
   } else {
     db.deviceProfiles.push(profile);
   }
-  project.product = profile.basics?.productName || project.product;
-  project.market = profile.basics?.regulation || project.market;
-  project.deviceClass = profile.basics?.deviceClass || project.deviceClass;
-  project.manufacturer = profile.company?.manufacturer || project.manufacturer;
+  Object.assign(project, profileProjectFields(profile));
   event(db, 'profile.saved', `保存设备画像：${project.product}`, { projectId: project.id });
   await writeDb(db);
   res.json(existing || profile);

@@ -42,7 +42,7 @@ import {
   regulatoryRegionOptions
 } from './features/hong-kong-registration/regulatory-options.js';
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
-import { profileFor, incompatiblePopulatedFields, normalizeMarketProfile, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway } from './features/device-profile/market-profile-configurations.js';
+import { profileFor, incompatiblePopulatedFieldsWithAliases, clearIncompatibleMarketFields, normalizeMarketProfile, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway, wizardSectionsFor } from './features/device-profile/market-profile-configurations.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity },
@@ -920,19 +920,19 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   });
   const resolvedProfileSections = draft.basics?.regulation === 'EU MDR'
     ? legacyResolvedProfileSections
-    : selectedMarketProfile.steps.map((step) => ({
+    : wizardSectionsFor(draft.basics?.regulation, draft).map((step) => ({
       id: step.id,
       title: step.title,
+      dataSectionId: step.dataSectionId,
       hint: '',
-      fields: (step.id === 'basics' ? [{ section: 'basics', name: 'regulation', label: '法规区域', required: true, type: 'select', options: regulatoryRegionOptions }, ...selectedMarketProfile.fields] : selectedMarketProfile.fields)
-        .filter((marketField) => marketField.section === step.id || (step.id === 'confirmation' && marketField.section === 'confirmations'))
+      fields: (step.id === 'basics' ? [{ sectionId: 'basics', name: 'regulation', label: '法规区域', required: true, type: 'select', options: regulatoryRegionOptions }, ...step.fields] : step.fields)
         .filter((marketField) => marketField.name !== 'hong_kong_classification_override_reason')
-        .map((marketField) => [marketField.name, marketField.label, marketField.required, marketField.type === 'select' ? 'select' : 'input', marketField.options])
+        .map((marketField) => [marketField.name, marketField.label, marketField.required, marketField.type === 'select' ? 'select' : 'input', marketField.options, marketField.sectionId])
     }));
   const section = resolvedProfileSections.find((item) => item.id === activeSection) || resolvedProfileSections[0];
   const missing = (draft.basics?.regulation === 'EU MDR' ? getMissingProfileFields(draft) : resolvedProfileSections.flatMap((profileSection) => profileSection.fields
-    .filter(([key, , required]) => required && !String(draft[profileSection.id]?.[key] || '').trim())
-    .map(([key, label]) => ({ sectionId: profileSection.id, key, label, text: `${profileSection.title} / ${label}` }))));
+    .filter(([key, , required, , , fieldSectionId]) => required && !String(draft[fieldSectionId || profileSection.dataSectionId || profileSection.id]?.[key] || '').trim())
+    .map(([key, label, , , , fieldSectionId]) => ({ sectionId: fieldSectionId || profileSection.dataSectionId || profileSection.id, key, label, text: `${profileSection.title} / ${label}` }))));
   const recommendedHongKongClass = draft.basics?.regulation === HONG_KONG_REGULATORY_REGION
     ? recommendHongKongDeviceClassForProfile(draft)
     : '';
@@ -942,7 +942,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
 
   const updateField = (sectionId, key, value) => {
     if (sectionId === 'basics' && key === 'regulation') {
-      const incompatible = incompatiblePopulatedFields(draft.basics?.regulation, value, draft);
+      const incompatible = incompatiblePopulatedFieldsWithAliases(draft.basics?.regulation, value, draft);
       if (incompatible.length) {
         setPendingRegionChange({ value, incompatible });
         return;
@@ -981,8 +981,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
 
   const confirmRegionChange = () => {
     if (!pendingRegionChange) return;
-    const next = structuredClone(draft);
-    for (const item of pendingRegionChange.incompatible) delete next[item.section]?.[item.name];
+    const next = clearIncompatibleMarketFields(draft.basics?.regulation, pendingRegionChange.value, draft);
     next.basics = { ...next.basics, regulation: pendingRegionChange.value };
     const normalizedNext = normalizeMarketProfile(next);
     setDraft(normalizedNext);
@@ -1087,7 +1086,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       <div className="profile-layout">
         <div className="profile-steps">
           {resolvedProfileSections.map((item, index) => {
-            const hasMissing = item.fields.some(([key, , required]) => required && !String(draft[item.id]?.[key] || '').trim());
+            const hasMissing = item.fields.some(([key, , required, , , fieldSectionId]) => required && !String(draft[fieldSectionId || item.dataSectionId || item.id]?.[key] || '').trim());
             return (
               <button key={item.id} className={activeSection === item.id ? 'profile-step active' : 'profile-step'} onClick={() => setActiveSection(item.id)}>
                 <span>{index + 1}</span>
@@ -1106,11 +1105,13 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
           </div>
           <div className="profile-fields">
             {draft.basics?.regulation === 'FDA' && section.id === 'market' && <div className="profile-field wide classification-warning"><span>FDA 系统推荐路径</span><strong>{recommendUnitedStatesFdaSubmissionPathway(draft)}</strong></div>}
-            {section.fields.map(([key, label, required, type, options]) => (
+            {section.fields.map(([key, label, required, type, options, fieldSectionId]) => {
+              const dataSectionId = fieldSectionId || section.dataSectionId || section.id;
+              return (
               <label className={type === 'textarea' ? 'profile-field wide' : 'profile-field'} key={key}>
                 <span>{label}{required ? ' *' : ''}</span>
                 {type === 'select' ? (
-                  <select value={draft[section.id]?.[key] || ''} onChange={(event) => updateField(section.id, key, event.target.value)}>
+                  <select value={draft[dataSectionId]?.[key] || ''} onChange={(event) => updateField(dataSectionId, key, event.target.value)}>
                     <option value="">请选择</option>
                     {options.map((option) => {
                       const optionValue = typeof option === 'string' ? option : option.value;
@@ -1119,12 +1120,12 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
                     })}
                   </select>
                 ) : type === 'textarea' ? (
-                  <textarea value={draft[section.id]?.[key] || ''} onChange={(event) => updateField(section.id, key, event.target.value)} />
+                  <textarea value={draft[dataSectionId]?.[key] || ''} onChange={(event) => updateField(dataSectionId, key, event.target.value)} />
                 ) : (
-                  <input value={draft[section.id]?.[key] || ''} onChange={(event) => updateField(section.id, key, event.target.value)} />
+                  <input value={draft[dataSectionId]?.[key] || ''} onChange={(event) => updateField(dataSectionId, key, event.target.value)} />
                 )}
               </label>
-            ))}
+            );})}
             {hasHongKongClassificationMismatch && (
               <label className="profile-field wide classification-warning">
                 <span>类别调整理由 *</span>

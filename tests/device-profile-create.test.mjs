@@ -61,6 +61,24 @@ test('creates a project, profile, and clinical evaluation task from a completed 
     assert.equal(result.profile.basics.product_name, productName);
     assert.equal(result.profile.company.manufacturer_full_name, 'Spec Test Manufacturer GmbH');
     assert.ok(result.tasks.some((item) => item.title === 'Clinical Evaluation'));
+    const missingRegion = makeProfile('Missing Region');
+    delete missingRegion.basics.regulation;
+    const missingRegionResponse = await fetch(`${baseUrl}/projects/from-profile`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: missingRegion }) });
+    assert.equal(missingRegionResponse.status, 400);
+
+    const legacyUpdate = {
+      basics: { productName: 'Updated Legacy EU', genericName: 'Legacy generic', deviceClass: 'Class IIa', classificationRule: 'Rule 10' },
+      scope: { intendedUse: 'Monitor', indications: 'Condition', targetPopulation: 'Adults', intendedUsers: 'Clinicians', operatingPrinciple: 'Sensor' }, market: { ceScenario: 'Update' },
+      company: { manufacturer: 'Updated GmbH', manufacturerAddress: 'Berlin' }, pathway: { evaluationPathway: 'Clinical trial route' }, scopeSettings: { databases: 'PubMed' }, confirmations: { status: 'draft' }
+    };
+    const updateResponse = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(legacyUpdate) });
+    assert.equal(updateResponse.status, 200);
+    const updated = await updateResponse.json();
+    assert.equal(updated.basics.product_name, 'Updated Legacy EU');
+    assert.equal(updated.basics.eu_mdr_device_class, 'Class IIa');
+
+    const incompleteUpdate = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ basics: { productName: 'Incomplete' } }) });
+    assert.equal(incompleteUpdate.status, 400);
 
     for (const regulation of ['NMPA', 'FDA', '香港注册（MDACS）']) {
       const legacyResponse = await fetch(`${baseUrl}/projects/from-profile`, {
