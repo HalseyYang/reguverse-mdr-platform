@@ -42,7 +42,7 @@ import {
   regulatoryRegionOptions
 } from './features/hong-kong-registration/regulatory-options.js';
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
-import { profileFor, incompatiblePopulatedFields, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway } from './features/device-profile/market-profile-configurations.js';
+import { profileFor, incompatiblePopulatedFields, normalizeMarketProfile, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway } from './features/device-profile/market-profile-configurations.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity },
@@ -300,15 +300,6 @@ function getMissingProfileFields(profile) {
       .filter(([key, , required]) => required && !String(profile[section.id]?.[key] || '').trim())
       .map(([key, label]) => ({ sectionId: section.id, key, label, text: `${section.title} / ${label}` }))
   );
-}
-
-function normalizeProfileForMarketEditor(profile = {}) {
-  const next = structuredClone(profile);
-  next.basics = { ...next.basics, product_name: next.basics?.product_name ?? next.basics?.productName ?? '', generic_name: next.basics?.generic_name ?? next.basics?.genericName ?? '' };
-  next.scope = { ...next.scope, intended_use: next.scope?.intended_use ?? next.scope?.intendedUse ?? '', indications: next.scope?.indications ?? '', target_population: next.scope?.target_population ?? next.scope?.targetPopulation ?? '', intended_users: next.scope?.intended_users ?? next.scope?.intendedUsers ?? '', operating_principle: next.scope?.operating_principle ?? next.scope?.operatingPrinciple ?? '' };
-  next.company = { ...next.company, manufacturer_full_name: next.company?.manufacturer_full_name ?? next.company?.manufacturer ?? '', manufacturer_address: next.company?.manufacturer_address ?? next.company?.manufacturerAddress ?? '' };
-  if (next.basics.regulation === HONG_KONG_REGULATORY_REGION) next.basics = { ...next.basics, hong_kong_device_class: next.basics.hong_kong_device_class ?? next.basics.deviceClass ?? '', hong_kong_classification_basis: next.basics.hong_kong_classification_basis ?? next.basics.classificationRule ?? '', hong_kong_classification_override_reason: next.basics.hong_kong_classification_override_reason ?? next.basics.classificationMismatchReason ?? '' };
-  return next;
 }
 
 function statusLabel(status) {
@@ -895,9 +886,9 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   useEffect(() => {
     if (mode === 'create') {
       const savedDraft = localStorage.getItem(draftStorageKey);
-      setDraft(normalizeProfileForMarketEditor(savedDraft ? JSON.parse(savedDraft) : profile || defaultDeviceProfile));
+      setDraft(normalizeMarketProfile(savedDraft ? JSON.parse(savedDraft) : profile || defaultDeviceProfile));
     } else {
-      setDraft(normalizeProfileForMarketEditor(profile || defaultDeviceProfile));
+      setDraft(normalizeMarketProfile(profile || defaultDeviceProfile));
     }
     setDirty(false);
   }, [profile?.projectId, profile?.updatedAt, mode, draftStorageKey]);
@@ -935,6 +926,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       hint: '',
       fields: (step.id === 'basics' ? [{ section: 'basics', name: 'regulation', label: '法规区域', required: true, type: 'select', options: regulatoryRegionOptions }, ...selectedMarketProfile.fields] : selectedMarketProfile.fields)
         .filter((marketField) => marketField.section === step.id || (step.id === 'confirmation' && marketField.section === 'confirmations'))
+        .filter((marketField) => marketField.name !== 'hong_kong_classification_override_reason')
         .map((marketField) => [marketField.name, marketField.label, marketField.required, marketField.type === 'select' ? 'select' : 'input', marketField.options])
     }));
   const section = resolvedProfileSections.find((item) => item.id === activeSection) || resolvedProfileSections[0];
@@ -942,10 +934,10 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     .filter(([key, , required]) => required && !String(draft[profileSection.id]?.[key] || '').trim())
     .map(([key, label]) => ({ sectionId: profileSection.id, key, label, text: `${profileSection.title} / ${label}` }))));
   const recommendedHongKongClass = draft.basics?.regulation === HONG_KONG_REGULATORY_REGION
-    ? recommendHongKongDeviceClass(draft.basics?.classificationRule).recommendedClass
+    ? recommendHongKongDeviceClassForProfile(draft)
     : '';
   const hasHongKongClassificationMismatch = Boolean(
-    recommendedHongKongClass && draft.basics?.deviceClass && recommendedHongKongClass !== draft.basics.deviceClass
+    recommendedHongKongClass && draft.basics?.hong_kong_device_class && recommendedHongKongClass !== draft.basics.hong_kong_device_class
   );
 
   const updateField = (sectionId, key, value) => {
@@ -973,6 +965,11 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
         nextSection.classificationMismatchReason = '';
       }
       const nextProfile = { ...current, [sectionId]: nextSection };
+      if (nextProfile.basics?.regulation === 'EU MDR') {
+        const aliases = { productName: 'product_name', genericName: 'generic_name', deviceClass: 'eu_mdr_device_class', classificationRule: 'eu_mdr_classification_rule', intendedUse: 'intended_use', targetPopulation: 'target_population', intendedUsers: 'intended_users', operatingPrinciple: 'operating_principle', ceScenario: 'eu_mdr_certification_scenario', manufacturer: 'manufacturer_full_name', manufacturerAddress: 'manufacturer_address', evaluationPathway: 'clinical_evaluation_pathway' };
+        if (aliases[key]) nextProfile[sectionId] = { ...nextProfile[sectionId], [aliases[key]]: value };
+        if (sectionId === 'scopeSettings') nextProfile.evaluation_scope = { ...(nextProfile.evaluation_scope || {}), clinical_evaluation_scope: [nextSection.databases, nextSection.searchWindow, nextSection.screeningMethod, nextSection.appraisalMethod, nextSection.exportFormats].filter(Boolean).join('; ') };
+      }
       if (nextProfile.basics?.regulation === 'FDA' && !nextProfile.market?.selected_submission_pathway) {
         const recommended = recommendUnitedStatesFdaSubmissionPathway(nextProfile);
         if (recommended !== 'Needs regulatory assessment') nextProfile.market = { ...(nextProfile.market || {}), selected_submission_pathway: recommended };
@@ -987,7 +984,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     const next = structuredClone(draft);
     for (const item of pendingRegionChange.incompatible) delete next[item.section]?.[item.name];
     next.basics = { ...next.basics, regulation: pendingRegionChange.value };
-    const normalizedNext = normalizeProfileForMarketEditor(next);
+    const normalizedNext = normalizeMarketProfile(next);
     setDraft(normalizedNext);
     setActiveSection(profileFor(pendingRegionChange.value, normalizedNext).steps[0]?.id || 'basics');
     setDirty(true);
@@ -1038,16 +1035,17 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       setActiveSection(missing[0].sectionId);
       return;
     }
-    if (hasHongKongClassificationMismatch && !String(draft.basics?.classificationMismatchReason || '').trim()) {
+    if (hasHongKongClassificationMismatch && !String(draft.basics?.hong_kong_classification_override_reason || '').trim()) {
       notify('器械类别与系统推荐不一致，请填写修改类别的理由后再继续。');
       setActiveSection('basics');
       return;
     }
     try {
+      const formalDraft = normalizeMarketProfile(draft);
       const saved = await api(mode === 'create' ? '/projects/from-profile' : `/projects/${projectId}/profile`, {
         method: mode === 'create' ? 'POST' : 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mode === 'create' ? { profile: draft } : draft)
+        body: JSON.stringify(mode === 'create' ? { profile: formalDraft } : formalDraft)
       });
       if (mode === 'create') {
         await refreshProjects();
@@ -1130,10 +1128,10 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
             {hasHongKongClassificationMismatch && (
               <label className="profile-field wide classification-warning">
                 <span>类别调整理由 *</span>
-                <p>系统根据香港分类依据推荐 {recommendedHongKongClass}，当前选择为 {draft.basics?.deviceClass}。允许修改，但需记录理由。</p>
+                <p>系统根据香港分类依据推荐 {recommendedHongKongClass}，当前选择为 {draft.basics?.hong_kong_device_class}。允许修改，但理由为必填项。</p>
                 <textarea
-                  value={draft.basics?.classificationMismatchReason || ''}
-                  onChange={(event) => updateField('basics', 'classificationMismatchReason', event.target.value)}
+                  value={draft.basics?.hong_kong_classification_override_reason || ''}
+                  onChange={(event) => updateField('basics', 'hong_kong_classification_override_reason', event.target.value)}
                 />
               </label>
             )}

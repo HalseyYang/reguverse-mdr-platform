@@ -70,6 +70,13 @@ test('creates a project, profile, and clinical evaluation task from a completed 
       assert.equal(legacyResponse.status, 400, `${regulation} camelCase creation must be rejected`);
       assert.equal((await legacyResponse.json()).code, 'market_profile_validation_failed');
     }
+    const ukProfile = makeProfile('Complete EU Fields With UK Region');
+    ukProfile.basics.regulation = 'UK MDR';
+    const ukResponse = await fetch(`${baseUrl}/projects/from-profile`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: ukProfile }) });
+    assert.equal(ukResponse.status, 400);
+    const ukError = await ukResponse.json();
+    assert.equal(ukError.code, 'market_profile_validation_failed');
+    assert.ok(ukError.incompatible.includes('basics.regulation'));
   } finally {
     child.kill();
     await wait(100);

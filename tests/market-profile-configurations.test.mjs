@@ -6,7 +6,8 @@ import {
   profileFor,
   incompatiblePopulatedFields,
   recommendHongKongDeviceClassForProfile,
-  recommendUnitedStatesFdaSubmissionPathway
+  recommendUnitedStatesFdaSubmissionPathway,
+  normalizeMarketProfile
 } from '../src/features/device-profile/market-profile-configurations.js';
 import { validateMarketProfile } from '../server/market-profile-validation.js';
 import {
@@ -19,6 +20,31 @@ const regions = ['EU MDR', 'NMPA', 'FDA', '香港注册（MDACS）'];
 test('supports exactly the four approved regulatory regions', () => {
   assert.deepEqual(SUPPORTED_REGULATORY_REGIONS, regions);
   assert.ok(!SUPPORTED_REGULATORY_REGIONS.includes('UK MDR'));
+});
+
+test('unknown regulatory regions never fall back to EU MDR', () => {
+  assert.throws(() => profileFor('UK MDR'), /Unsupported regulatory region/);
+  const completeEu = completeEuProfile();
+  completeEu.basics.regulation = 'UK MDR';
+  const result = validateMarketProfile('UK MDR', completeEu);
+  assert.equal(result.code, 'market_profile_validation_failed');
+  assert.ok(result.incompatible.includes('basics.regulation'));
+});
+
+test('normalizes a complete legacy EU profile into the formal contract without losing values', () => {
+  const normalized = normalizeMarketProfile({
+    basics: { productName: 'Legacy Device', genericName: 'Legacy generic', regulation: 'EU MDR', deviceClass: 'Class IIa', classificationRule: 'Rule 10' },
+    scope: { intendedUse: 'Monitor', indications: 'Condition', targetPopulation: 'Adults', intendedUsers: 'Clinicians', operatingPrinciple: 'Sensor' },
+    market: { ceScenario: 'Initial certification' }, company: { manufacturer: 'Legacy GmbH', manufacturerAddress: 'Berlin' },
+    pathway: { evaluationPathway: 'Clinical trial route' }, scopeSettings: { databases: 'PubMed', searchWindow: '5 years', screeningMethod: 'Dual', appraisalMethod: 'GRADE', exportFormats: 'RIS' },
+    confirmations: { status: 'draft' }
+  });
+  assert.equal(normalized.basics.eu_mdr_device_class, 'Class IIa');
+  assert.equal(normalized.basics.eu_mdr_classification_rule, 'Rule 10');
+  assert.equal(normalized.market.eu_mdr_certification_scenario, 'Initial certification');
+  assert.equal(normalized.pathway.clinical_evaluation_pathway, 'Clinical trial route');
+  assert.match(normalized.evaluation_scope.clinical_evaluation_scope, /PubMed/);
+  assert.equal(validateMarketProfile('EU MDR', normalized).code, null);
 });
 
 test('provides the approved step count and key market fields', () => {
@@ -106,6 +132,10 @@ function completeHongKongProfile() {
     company: { manufacturer_full_name: 'Acme', manufacturer_address: 'One St', hong_kong_local_responsible_person_name: 'LRP', hong_kong_local_responsible_person_address: 'HK', hong_kong_local_responsible_person_contact: 'Lee', hong_kong_local_responsible_person_phone: '123', hong_kong_local_responsible_person_email: 'a@example.com' },
     pathway: { hong_kong_application_pathway: '新申请', relies_on_other_market_approval: 'No' }, confirmations: { status: 'draft' }
   };
+}
+
+function completeEuProfile() {
+  return { basics: { product_name: 'Device', generic_name: 'Generic', regulation: 'EU MDR', eu_mdr_device_class: 'Class IIa', eu_mdr_classification_rule: 'Rule 10' }, scope: { intended_use: 'Monitor', indications: 'Condition', target_population: 'Adults', intended_users: 'Clinicians', operating_principle: 'Sensor' }, market: { eu_mdr_certification_scenario: 'Initial' }, company: { manufacturer_full_name: 'Acme', manufacturer_address: 'Berlin' }, pathway: { clinical_evaluation_pathway: 'Clinical trial route' }, evaluation_scope: { clinical_evaluation_scope: 'PubMed, five years, dual screening, GRADE, RIS' }, confirmations: { status: 'draft' } };
 }
 
 test('reports populated fields that are incompatible with a market switch', () => {

@@ -1,6 +1,7 @@
-import { profileFor, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway } from '../src/features/device-profile/market-profile-configurations.js';
+import { profileFor, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway, SUPPORTED_REGULATORY_REGIONS } from '../src/features/device-profile/market-profile-configurations.js';
 const populated = (value) => value !== undefined && value !== null && `${value}`.trim() !== '';
 export function validateMarketProfile(region, profile = {}) {
+  if (!SUPPORTED_REGULATORY_REGIONS.includes(region)) return { code: 'market_profile_validation_failed', missing: [], incompatible: ['basics.regulation'], unsupportedRegulatoryRegion: region };
   const config = profileFor(region, profile);
   const missing = config.fields.filter((item) => item.required && !populated(profile?.[item.section]?.[item.name])).map((item) => item.name);
   if (region === 'FDA') {
