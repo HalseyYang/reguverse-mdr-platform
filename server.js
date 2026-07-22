@@ -333,14 +333,17 @@ function missingProfileFields(profile = {}) {
 }
 
 function profileProjectFields(profile) {
-  const product = profile.basics?.productName || 'New Device';
-  const isHongKongRegistration = profile.basics?.regulation === '香港注册（MDACS）';
+  const product = profile.basics?.product_name || profile.basics?.productName;
+  const region = profile.basics?.regulation;
+  const regionClass = region === 'FDA' ? profile.basics?.united_states_fda_device_class
+    : region === '香港注册（MDACS）' ? profile.basics?.hong_kong_device_class
+      : region === 'EU MDR' ? profile.basics?.eu_mdr_device_class : profile.basics?.nmpa_device_class;
   return {
-    title: isHongKongRegistration ? `香港注册 - ${product}` : `EU MDR CER - ${product}`,
+    title: `${region} - ${product}`,
     product,
-    market: profile.basics?.regulation || 'EU MDR',
-    deviceClass: profile.basics?.deviceClass || 'Class IIa',
-    manufacturer: profile.company?.manufacturer || 'New Manufacturer'
+    market: region,
+    deviceClass: regionClass,
+    manufacturer: profile.company?.manufacturer_full_name || profile.company?.manufacturer
   };
 }
 
@@ -1016,18 +1019,8 @@ app.post('/api/projects', async (req, res) => {
 app.post('/api/projects/from-profile', async (req, res) => {
   const profileInput = req.body.profile || req.body;
   const selectedRegion = profileInput.basics?.regulation || 'EU MDR';
-  const usesMarketContract = Object.values(profileInput).some((section) => section && typeof section === 'object' && Object.keys(section).some((key) => key.includes('_')));
-  if (usesMarketContract) {
-    const validation = validateMarketProfile(selectedRegion, profileInput);
-    if (validation.code) return res.status(400).json(validation);
-  }
-  const missing = usesMarketContract ? [] : missingProfileFields(profileInput);
-  if (missing.length) {
-    return res.status(400).json({ error: 'Missing required profile fields', missing });
-  }
-  if (!usesMarketContract && missingHongKongClassificationOverrideReason(profileInput)) {
-    return res.status(400).json({ error: 'Classification override reason is required' });
-  }
+  const validation = validateMarketProfile(selectedRegion, profileInput);
+  if (validation.code) return res.status(400).json(validation);
 
   const db = await readDb();
   const id = `project-${Date.now()}`;

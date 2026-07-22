@@ -25,20 +25,11 @@ async function waitForApi() {
 
 function hongKongProfile(productName) {
   return {
-    basics: {
-      productName,
-      genericName: 'Single-use laparoscopic needle holder',
-      regulation: '香港注册（MDACS）',
-      deviceClass: 'Class II',
-      classificationRule: 'RULE_6_SURGICALLY_INVASIVE_TRANSIENT',
-      classificationMismatchReason: ''
-    },
-    scope: { intendedUse: 'For laparoscopic tissue suturing.', indications: 'Laparoscopic surgery.', targetPopulation: 'Surgical patients.', intendedUsers: 'Healthcare professionals.', useEnvironment: 'Operating room.', operatingPrinciple: 'Mechanical grasping and needle manipulation.' },
-    market: { ceScenario: 'Initial certification / marketed elsewhere', marketedStatus: 'Marketed outside Hong Kong.', marketHistory: 'To be confirmed.', clinicalStudySummary: 'Not applicable to this project creation test.' },
-    company: { manufacturer: 'Spec Medical Device Manufacturer', manufacturerAddress: 'Shenzhen, China', srn: 'Not applicable', euAuthorizedRepresentative: 'Not applicable', teamSize: 'Test team' },
-    pathway: { evaluationPathway: 'Mixed route', equivalenceNeeded: 'Conditional', clinicalEvaluationType: 'Initial clinical evaluation', step10EquivalenceActive: 'Conditional' },
-    scopeSettings: { databases: 'Not applicable', searchWindow: 'Not applicable', screeningMethod: 'Not applicable', appraisalMethod: 'Not applicable', exportFormats: 'DOCX' },
-    confirmations: { required: 'Confirm Hong Kong classification and source document type.', status: 'draft' }
+    basics: { product_name: productName, generic_name: 'Needle holder', regulation: '香港注册（MDACS）', hong_kong_device_class: 'Class II', hong_kong_classification_basis: 'RULE_6_SURGICALLY_INVASIVE_TRANSIENT' },
+    scope: { intended_use: 'Suturing', indications: 'Surgery', target_population: 'Adults', intended_users: 'Surgeons', operating_principle: 'Mechanical' },
+    market: { hong_kong_application_type: '新申请', hong_kong_marketing_status: '未在香港上市' },
+    company: { manufacturer_full_name: 'Spec Medical Device Manufacturer', manufacturer_address: 'Shenzhen, China', hong_kong_local_responsible_person_name: 'LRP', hong_kong_local_responsible_person_address: 'Hong Kong', hong_kong_local_responsible_person_contact: 'Lee', hong_kong_local_responsible_person_phone: '123', hong_kong_local_responsible_person_email: 'lrp@example.com' },
+    pathway: { hong_kong_application_pathway: '新申请', relies_on_other_market_approval: 'No' }, confirmations: { status: 'draft' }
   };
 }
 
@@ -57,9 +48,11 @@ test('creating an MDACS profile creates the Hong Kong document revision task ins
     const result = await response.json();
     assert.deepEqual(result.tasks.map((task) => task.title), ['香港注册文件修订']);
     assert.equal(result.project.market, '香港注册（MDACS）');
+    assert.equal(result.project.deviceClass, 'Class II');
+    assert.equal(result.project.manufacturer, 'Spec Medical Device Manufacturer');
 
     const mismatchedProfile = hongKongProfile(`Hong Kong Mismatch ${Date.now()}`);
-    mismatchedProfile.basics.deviceClass = 'Class IV';
+    mismatchedProfile.basics.hong_kong_device_class = 'Class IV';
     const mismatchResponse = await fetch(`${baseUrl}/projects/from-profile`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -67,7 +60,7 @@ test('creating an MDACS profile creates the Hong Kong document revision task ins
     });
     assert.equal(mismatchResponse.status, 400);
     const mismatchResult = await mismatchResponse.json();
-    assert.equal(mismatchResult.error, 'Classification override reason is required');
+    assert.ok(mismatchResult.missing.includes('hong_kong_classification_override_reason'));
   } finally {
     child.kill();
     await wait(100);

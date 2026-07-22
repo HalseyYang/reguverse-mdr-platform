@@ -42,7 +42,7 @@ import {
   regulatoryRegionOptions
 } from './features/hong-kong-registration/regulatory-options.js';
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
-import { profileFor, incompatiblePopulatedFields } from './features/device-profile/market-profile-configurations.js';
+import { profileFor, incompatiblePopulatedFields, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway } from './features/device-profile/market-profile-configurations.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity },
@@ -300,6 +300,15 @@ function getMissingProfileFields(profile) {
       .filter(([key, , required]) => required && !String(profile[section.id]?.[key] || '').trim())
       .map(([key, label]) => ({ sectionId: section.id, key, label, text: `${section.title} / ${label}` }))
   );
+}
+
+function normalizeProfileForMarketEditor(profile = {}) {
+  const next = structuredClone(profile);
+  next.basics = { ...next.basics, product_name: next.basics?.product_name ?? next.basics?.productName ?? '', generic_name: next.basics?.generic_name ?? next.basics?.genericName ?? '' };
+  next.scope = { ...next.scope, intended_use: next.scope?.intended_use ?? next.scope?.intendedUse ?? '', indications: next.scope?.indications ?? '', target_population: next.scope?.target_population ?? next.scope?.targetPopulation ?? '', intended_users: next.scope?.intended_users ?? next.scope?.intendedUsers ?? '', operating_principle: next.scope?.operating_principle ?? next.scope?.operatingPrinciple ?? '' };
+  next.company = { ...next.company, manufacturer_full_name: next.company?.manufacturer_full_name ?? next.company?.manufacturer ?? '', manufacturer_address: next.company?.manufacturer_address ?? next.company?.manufacturerAddress ?? '' };
+  if (next.basics.regulation === HONG_KONG_REGULATORY_REGION) next.basics = { ...next.basics, hong_kong_device_class: next.basics.hong_kong_device_class ?? next.basics.deviceClass ?? '', hong_kong_classification_basis: next.basics.hong_kong_classification_basis ?? next.basics.classificationRule ?? '', hong_kong_classification_override_reason: next.basics.hong_kong_classification_override_reason ?? next.basics.classificationMismatchReason ?? '' };
+  return next;
 }
 
 function statusLabel(status) {
@@ -886,9 +895,9 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   useEffect(() => {
     if (mode === 'create') {
       const savedDraft = localStorage.getItem(draftStorageKey);
-      setDraft(savedDraft ? JSON.parse(savedDraft) : profile || defaultDeviceProfile);
+      setDraft(normalizeProfileForMarketEditor(savedDraft ? JSON.parse(savedDraft) : profile || defaultDeviceProfile));
     } else {
-      setDraft(profile || defaultDeviceProfile);
+      setDraft(normalizeProfileForMarketEditor(profile || defaultDeviceProfile));
     }
     setDirty(false);
   }, [profile?.projectId, profile?.updatedAt, mode, draftStorageKey]);
@@ -949,6 +958,10 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     }
     setDraft((current) => {
       const nextSection = { ...(current[sectionId] || {}), [key]: value };
+      if (sectionId === 'basics' && key === 'hong_kong_classification_basis') {
+        nextSection.hong_kong_device_class = recommendHongKongDeviceClassForProfile({ ...current, basics: nextSection });
+        nextSection.hong_kong_classification_override_reason = '';
+      }
       if (sectionId === 'basics' && key === 'regulation') {
         const configuration = fieldConfigurationForRegulatoryRegion(value);
         nextSection.classificationRule = '';
@@ -959,7 +972,12 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
         nextSection.deviceClass = recommendHongKongDeviceClass(value).recommendedClass;
         nextSection.classificationMismatchReason = '';
       }
-      return { ...current, [sectionId]: nextSection };
+      const nextProfile = { ...current, [sectionId]: nextSection };
+      if (nextProfile.basics?.regulation === 'FDA' && !nextProfile.market?.selected_submission_pathway) {
+        const recommended = recommendUnitedStatesFdaSubmissionPathway(nextProfile);
+        if (recommended !== 'Needs regulatory assessment') nextProfile.market = { ...(nextProfile.market || {}), selected_submission_pathway: recommended };
+      }
+      return nextProfile;
     });
     setDirty(true);
   };
@@ -969,8 +987,9 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     const next = structuredClone(draft);
     for (const item of pendingRegionChange.incompatible) delete next[item.section]?.[item.name];
     next.basics = { ...next.basics, regulation: pendingRegionChange.value };
-    setDraft(next);
-    setActiveSection(selectedMarketProfile.steps[0]?.id || 'basics');
+    const normalizedNext = normalizeProfileForMarketEditor(next);
+    setDraft(normalizedNext);
+    setActiveSection(profileFor(pendingRegionChange.value, normalizedNext).steps[0]?.id || 'basics');
     setDirty(true);
     setPendingRegionChange(null);
   };
@@ -1088,6 +1107,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
             <p>{section.hint}</p>
           </div>
           <div className="profile-fields">
+            {draft.basics?.regulation === 'FDA' && section.id === 'market' && <div className="profile-field wide classification-warning"><span>FDA 系统推荐路径</span><strong>{recommendUnitedStatesFdaSubmissionPathway(draft)}</strong></div>}
             {section.fields.map(([key, label, required, type, options]) => (
               <label className={type === 'textarea' ? 'profile-field wide' : 'profile-field'} key={key}>
                 <span>{label}{required ? ' *' : ''}</span>

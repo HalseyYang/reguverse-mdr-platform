@@ -27,52 +27,13 @@ async function waitForApi() {
 
 function makeProfile(productName) {
   return {
-    basics: {
-      productName,
-      genericName: 'Digital therapeutic test device',
-      regulation: 'EU MDR',
-      deviceType: 'SaMD',
-      deviceClass: 'Class I',
-      classificationRule: 'MDR Annex VIII software rule assessment required'
-    },
-    scope: {
-      intendedUse: 'A software-only test device for validating profile creation.',
-      indications: 'Adult users in a test indication.',
-      targetPopulation: 'Adult test users.',
-      intendedUsers: 'Patients and healthcare professionals.',
-      useEnvironment: 'Home setting.',
-      operatingPrinciple: 'Software-guided intervention and tracking.'
-    },
-    market: {
-      ceScenario: 'Initial certification / clinical trial evidence route',
-      marketedStatus: 'Test product, not marketed.',
-      marketHistory: 'No market history in test.',
-      clinicalStudySummary: 'Test clinical summary.'
-    },
-    company: {
-      manufacturer: 'Spec Test Manufacturer GmbH',
-      manufacturerAddress: 'Munich, Germany',
-      srn: 'To be confirmed',
-      euAuthorizedRepresentative: 'Not required if manufacturer is established in EU/EEA',
-      teamSize: 'Test team'
-    },
-    pathway: {
-      evaluationPathway: 'Clinical trial route',
-      equivalenceNeeded: 'No',
-      clinicalEvaluationType: 'Initial clinical evaluation',
-      step10EquivalenceActive: 'No'
-    },
-    scopeSettings: {
-      databases: 'PubMed, Embase',
-      searchWindow: 'Default 5 years',
-      screeningMethod: 'Title/abstract screening followed by full-text appraisal',
-      appraisalMethod: 'Relevance, quality, applicability, and evidence grading',
-      exportFormats: 'PubMed NBIB; Embase RIS'
-    },
-    confirmations: {
-      required: 'Confirm final IFU wording before formal use.',
-      status: 'draft'
-    }
+    basics: { product_name: productName, generic_name: 'Digital therapeutic test device', regulation: 'EU MDR', eu_mdr_device_class: 'Class I', eu_mdr_classification_rule: 'Rule 11' },
+    scope: { intended_use: 'Software intervention.', indications: 'Adult indication.', target_population: 'Adults', intended_users: 'Patients', operating_principle: 'Software guidance.' },
+    market: { eu_mdr_certification_scenario: 'Initial certification' },
+    company: { manufacturer_full_name: 'Spec Test Manufacturer GmbH', manufacturer_address: 'Munich, Germany' },
+    pathway: { clinical_evaluation_pathway: 'Clinical trial route' },
+    evaluation_scope: { clinical_evaluation_scope: 'Full evaluation' },
+    confirmations: { status: 'draft' }
   };
 }
 
@@ -97,9 +58,18 @@ test('creates a project, profile, and clinical evaluation task from a completed 
     assert.equal(response.status, 201);
     const result = await response.json();
     assert.equal(result.project.product, productName);
-    assert.equal(result.profile.basics.productName, productName);
-    assert.equal(result.profile.company.manufacturer, 'Spec Test Manufacturer GmbH');
+    assert.equal(result.profile.basics.product_name, productName);
+    assert.equal(result.profile.company.manufacturer_full_name, 'Spec Test Manufacturer GmbH');
     assert.ok(result.tasks.some((item) => item.title === 'Clinical Evaluation'));
+
+    for (const regulation of ['NMPA', 'FDA', '香港注册（MDACS）']) {
+      const legacyResponse = await fetch(`${baseUrl}/projects/from-profile`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: { basics: { productName: 'Legacy', genericName: 'Device', regulation }, company: { manufacturer: 'Legacy Manufacturer' } } })
+      });
+      assert.equal(legacyResponse.status, 400, `${regulation} camelCase creation must be rejected`);
+      assert.equal((await legacyResponse.json()).code, 'market_profile_validation_failed');
+    }
   } finally {
     child.kill();
     await wait(100);

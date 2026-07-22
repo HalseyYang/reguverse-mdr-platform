@@ -27,49 +27,10 @@ async function waitForApi() {
 
 function completeProfile(productName) {
   return {
-    basics: {
-      productName,
-      genericName: 'Digital therapeutic test device',
-      regulation: 'EU MDR',
-      deviceType: 'SaMD',
-      deviceClass: 'Class I',
-      classificationRule: 'MDR Annex VIII software rule assessment required'
-    },
-    scope: {
-      intendedUse: 'A software-only test device for task workflow initialization.',
-      indications: 'Adult users in a test indication.',
-      targetPopulation: 'Adult test users.',
-      intendedUsers: 'Patients and healthcare professionals.',
-      useEnvironment: 'Home setting.',
-      operatingPrinciple: 'Software-guided intervention and tracking.'
-    },
-    market: {
-      ceScenario: 'Initial certification / clinical trial evidence route',
-      marketedStatus: 'Test product, not marketed.',
-      marketHistory: 'No market history in test.',
-      clinicalStudySummary: 'Test clinical summary.'
-    },
-    company: {
-      manufacturer: 'Workflow Test Manufacturer GmbH',
-      manufacturerAddress: 'Munich, Germany'
-    },
-    pathway: {
-      evaluationPathway: 'Clinical trial route',
-      equivalenceNeeded: 'No',
-      clinicalEvaluationType: 'Initial clinical evaluation',
-      step10EquivalenceActive: 'No'
-    },
-    scopeSettings: {
-      databases: 'PubMed, Embase',
-      searchWindow: 'Default 5 years',
-      screeningMethod: 'Title/abstract screening followed by full-text appraisal',
-      appraisalMethod: 'Relevance, quality, applicability, and evidence grading',
-      exportFormats: 'PubMed NBIB; Embase RIS'
-    },
-    confirmations: {
-      required: 'Confirm final IFU wording before formal use.',
-      status: 'draft'
-    }
+    basics: { product_name: productName, generic_name: 'Digital therapeutic', regulation: 'EU MDR', eu_mdr_device_class: 'Class I', eu_mdr_classification_rule: 'Rule 11' },
+    scope: { intended_use: 'Software intervention', indications: 'Adult indication', target_population: 'Adults', intended_users: 'Patients', operating_principle: 'Software' },
+    market: { eu_mdr_certification_scenario: 'Initial certification' }, company: { manufacturer_full_name: 'Workflow Test Manufacturer GmbH', manufacturer_address: 'Munich, Germany' },
+    pathway: { clinical_evaluation_pathway: 'Clinical trial route' }, evaluation_scope: { clinical_evaluation_scope: 'Full' }, confirmations: { status: 'draft' }
   };
 }
 
