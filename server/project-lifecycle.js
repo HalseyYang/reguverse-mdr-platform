@@ -30,6 +30,7 @@ export function listDeletedProjects(db) {
 export function softDeleteProject(db, id, now) {
   const next = cloneDb(db);
   const project = requireProject(next, id);
+  if (project.deletedAt) throw new Error(`Project already deleted: ${id}`);
   const deletedAt = parseNow(now);
   const purgeAt = new Date(deletedAt);
   purgeAt.setUTCDate(purgeAt.getUTCDate() + 30);
@@ -41,6 +42,7 @@ export function softDeleteProject(db, id, now) {
 export function restoreProject(db, id) {
   const next = cloneDb(db);
   const project = requireProject(next, id);
+  if (!project.deletedAt) throw new Error(`Project is not deleted: ${id}`);
   delete project.deletedAt;
   delete project.purgeAt;
   return { db: next, project: structuredClone(project), fileCount: (next.files || []).filter((file) => file.projectId === id).length };
@@ -60,6 +62,12 @@ export function purgeProject(db, id) {
     fileCount: projectFiles.length,
     uploadReferences: projectFiles.map((file) => file.storedName).filter(Boolean)
   };
+}
+
+export async function purgeProjectSafely(db, id, deleteUploads) {
+  const purged = purgeProject(db, id);
+  await deleteUploads(purged.uploadReferences);
+  return purged;
 }
 
 export function purgeExpiredProjects(db, now) {

@@ -389,7 +389,7 @@ function App() {
       const next = await api('/projects');
       setProjectList(next);
       setApiStatus('connected');
-      setSelectedProject((current) => next.find((item) => item.id === current?.id) || next[0] || seedProjects[0]);
+      setSelectedProject((current) => next.find((item) => item.id === current?.id) || next[0] || null);
     } catch (error) {
       setApiStatus('offline');
       notify('本地 API 未连接，当前使用前端演示数据。请运行 npm run api。');
@@ -499,6 +499,7 @@ function App() {
 }
 
 function Dashboard({ projects, selectedProject, setSelectedProject, go, notify, startProfileCreate }) {
+  if (!selectedProject) return <section className="panel empty-projects"><h2>暂无有效项目</h2><p>已删除项目不会显示在工作区。你可以新建项目继续。</p><button className="primary-btn" onClick={startProfileCreate}><Plus size={16} />新建项目</button></section>;
   return (
     <div className="dashboard-grid">
       <section className="panel span-2">
@@ -511,7 +512,7 @@ function Dashboard({ projects, selectedProject, setSelectedProject, go, notify, 
         </div>
         <div className="project-grid">
           {projects.map((project) => (
-            <button key={project.id} className={selectedProject.id === project.id ? 'project-card active' : 'project-card'} onClick={() => {
+            <button key={project.id} className={selectedProject?.id === project.id ? 'project-card active' : 'project-card'} onClick={() => {
               setSelectedProject(project);
               notify(`已选择项目：${project.title}`);
             }}>
@@ -710,6 +711,10 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
     setCreatingProfile(false);
     notify(`项目已移入回收区：${selectedProject.title}`);
   };
+
+  if (!creatingProfile && !selectedProject) {
+    return <section className="panel empty-projects"><h2>暂无有效项目</h2><p>请选择项目或创建新项目。</p><button className="primary-btn" onClick={startProfileCreate}><Plus size={16} />新建项目</button></section>;
+  }
 
   return (
     <div className="project-detail-layout">

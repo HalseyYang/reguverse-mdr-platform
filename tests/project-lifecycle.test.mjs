@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { copyFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -7,6 +10,7 @@ import {
   listDeleted,
   listDeletedProjects,
   prepareDeletedProjects,
+  purgeProjectSafely,
   purgeExpiredProjects,
   restore,
   restoreProject,
@@ -98,4 +102,47 @@ test('deleted-project handling purges expired projects before returning the recy
   assert.equal(result.db.projects.some(({ id }) => id === 'alpha'), false);
   assert.deepEqual(result.purgedProjectIds, ['alpha']);
   assert.deepEqual(result.uploadReferences, ['server-generated-a']);
+});
+
+test('delete, restore, and permanent deletion enforce lifecycle state transitions', () => {
+  const active = fixture();
+  const first = softDeleteProject(active, 'alpha', NOW);
+
+  assert.throws(() => softDeleteProject(first.db, 'alpha', '2026-07-23T02:00:00.000Z'), /Project already deleted: alpha/);
+  assert.equal(first.project.purgeAt, '2026-08-21T02:00:00.000Z');
+  assert.throws(() => restore(active, 'alpha'), /Project is not deleted: alpha/);
+});
+
+test('safe permanent deletion keeps project and storedName when physical deletion fails', async () => {
+  const deleted = softDeleteProject(fixture(), 'alpha', NOW).db;
+  const failure = new Error('upload locked');
+
+  await assert.rejects(() => purgeProjectSafely(deleted, 'alpha', async () => { throw failure; }), /upload locked/);
+  assert.equal(deleted.projects.some(({ id }) => id === 'alpha'), true);
+  assert.equal(deleted.files.find(({ projectId }) => projectId === 'alpha').storedName, 'server-generated-a');
+});
+
+test('API rejects stale access and invalid lifecycle transitions after soft deletion', async () => {
+  const port = 19878;
+  const baseUrl = `http://127.0.0.1:${port}/api`;
+  const dbPath = join(process.cwd(), 'data', 'db.json');
+  const backupPath = join(process.cwd(), 'data', '.db.lifecycle-backup.json');
+  await copyFile(dbPath, backupPath);
+  const child = spawn(process.execPath, ['server.js'], { cwd: process.cwd(), env: { ...process.env, PORT: String(port) }, stdio: 'ignore' });
+  try {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      try { if ((await fetch(`${baseUrl}/health`)).ok) break; } catch { /* retry */ }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal((await fetch(`${baseUrl}/projects/nmpa-reg`, { method: 'DELETE' })).status, 200);
+    assert.equal((await fetch(`${baseUrl}/projects/nmpa-reg`, { method: 'DELETE' })).status, 409);
+    assert.equal((await fetch(`${baseUrl}/projects/nmpa-reg`)).status, 409);
+    assert.equal((await fetch(`${baseUrl}/projects/nmpa-reg/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 409);
+    assert.equal((await fetch(`${baseUrl}/projects/eu-cer/restore`, { method: 'POST' })).status, 409);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await copyFile(backupPath, dbPath);
+    await rm(backupPath, { force: true });
+  }
 });

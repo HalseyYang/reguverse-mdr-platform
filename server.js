@@ -6,9 +6,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   listActiveProjects,
-  prepareDeletedProjects,
-  purgeExpiredProjects,
-  purgeProject,
+  listDeletedProjects,
+  purgeProjectSafely,
   restoreProject,
   softDeleteProject
 } from './server/project-lifecycle.js';
@@ -220,6 +219,49 @@ async function removeStoredUploads(storedNames = []) {
     if (path.dirname(target) !== path.resolve(uploadDir)) return;
     await fs.rm(target, { force: true });
   }));
+}
+
+function findActiveProjectOrRespond(db, projectId, res) {
+  const project = db.projects.find((item) => item.id === projectId);
+  if (!project) {
+    res.status(404).json({ error: `Project not found: ${projectId}` });
+    return null;
+  }
+  if (project.deletedAt) {
+    res.status(409).json({ error: `Project is deleted: ${projectId}` });
+    return null;
+  }
+  return project;
+}
+
+function lifecycleErrorStatus(error) {
+  return error.message.startsWith('Project not found') ? 404 : 409;
+}
+
+async function requireActiveProjectRequest(req, res, next) {
+  try {
+    const db = await readDb();
+    if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
+    req.projectDb = db;
+    next();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}
+
+async function purgeExpiredSafely(db, now) {
+  let next = db;
+  const expiredIds = next.projects.filter((project) => project.deletedAt && new Date(project.purgeAt || project.deletedAt) <= now).map((project) => project.id);
+  for (const id of expiredIds) {
+    try {
+      const purged = await purgeProjectSafely(next, id, removeStoredUploads);
+      next = purged.db;
+      await writeDb(next);
+    } catch (error) {
+      console.error(`Expired project cleanup failed for ${id}: ${error.message}`);
+    }
+  }
+  return next;
 }
 
 function event(db, type, message, meta = {}) {
@@ -904,23 +946,14 @@ app.post('/api/profile-extractions/preview', upload.single('file'), async (req, 
 
 app.get('/api/projects', async (req, res) => {
   let db = await readDb();
-  const expired = purgeExpiredProjects(db, new Date());
-  if (expired.purgedProjectIds.length) {
-    db = expired.db;
-    await writeDb(db);
-    await removeStoredUploads(expired.uploadReferences);
-  }
+  db = await purgeExpiredSafely(db, new Date());
   res.json(listActiveProjects(db));
 });
 
 app.get('/api/projects/deleted', async (req, res) => {
-  const db = await readDb();
-  const result = prepareDeletedProjects(db, new Date());
-  if (result.purgedProjectIds.length) {
-    await writeDb(result.db);
-    await removeStoredUploads(result.uploadReferences);
-  }
-  res.json(result.projects);
+  let db = await readDb();
+  db = await purgeExpiredSafely(db, new Date());
+  res.json(listDeletedProjects(db));
 });
 
 app.post('/api/projects', async (req, res) => {
@@ -985,7 +1018,7 @@ app.delete('/api/projects/:projectId', async (req, res) => {
     await writeDb(result.db);
     res.json({ project: result.project, fileCount: result.fileCount, deletedAt: result.project.deletedAt, purgeAt: result.project.purgeAt });
   } catch (error) {
-    res.status(404).json({ error: error.message });
+    res.status(lifecycleErrorStatus(error)).json({ error: error.message });
   }
 });
 
@@ -997,16 +1030,15 @@ app.post('/api/projects/:projectId/restore', async (req, res) => {
     await writeDb(result.db);
     res.json({ project: result.project, fileCount: result.fileCount, deletedAt: null, purgeAt: null });
   } catch (error) {
-    res.status(404).json({ error: error.message });
+    res.status(lifecycleErrorStatus(error)).json({ error: error.message });
   }
 });
 
 app.delete('/api/projects/:projectId/permanent', async (req, res) => {
   const db = await readDb();
   try {
-    const result = purgeProject(db, req.params.projectId);
+    const result = await purgeProjectSafely(db, req.params.projectId, removeStoredUploads);
     await writeDb(result.db);
-    await removeStoredUploads(result.uploadReferences);
     res.json({ project: result.project, fileCount: result.fileCount, deletedAt: result.project.deletedAt, purgeAt: result.project.purgeAt });
   } catch (error) {
     const status = error.message.startsWith('Project not found') ? 404 : 409;
@@ -1016,8 +1048,8 @@ app.delete('/api/projects/:projectId/permanent', async (req, res) => {
 
 app.get('/api/projects/:projectId', async (req, res) => {
   const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
+  if (!project) return;
   res.json({
     project,
     profile: db.deviceProfiles.find((item) => item.projectId === project.id) || null,
@@ -1036,8 +1068,8 @@ app.get('/api/task-templates', (req, res) => {
 
 app.post('/api/projects/:projectId/tasks', async (req, res) => {
   const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
+  if (!project) return;
   const templateId = req.body.templateId || 'clinical-evaluation';
   const task = createTaskFromTemplate(db, project.id, templateId);
   if (!task) return res.status(400).json({ error: 'Unsupported task template' });
@@ -1052,8 +1084,8 @@ app.post('/api/projects/:projectId/tasks', async (req, res) => {
 
 app.put('/api/projects/:projectId/profile', async (req, res) => {
   const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
+  if (!project) return;
   const existing = db.deviceProfiles.find((item) => item.projectId === project.id);
   const profile = {
     projectId: project.id,
@@ -1074,10 +1106,10 @@ app.put('/api/projects/:projectId/profile', async (req, res) => {
   res.json(existing || profile);
 });
 
-app.post('/api/projects/:projectId/files', upload.single('file'), async (req, res) => {
-  const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+app.post('/api/projects/:projectId/files', requireActiveProjectRequest, upload.single('file'), async (req, res) => {
+  const db = req.projectDb;
+  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
+  if (!project) return;
   const file = {
     id: `file-${Date.now()}`,
     projectId: project.id,
@@ -1095,8 +1127,8 @@ app.post('/api/projects/:projectId/files', upload.single('file'), async (req, re
 
 app.post('/api/projects/:projectId/files/:fileId/extract-profile', async (req, res) => {
   const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
+  if (!project) return;
   const file = db.files.find((item) => item.projectId === project.id && item.id === req.params.fileId);
   if (!file) return res.status(404).json({ error: 'File not found' });
 
@@ -1143,6 +1175,7 @@ app.post('/api/projects/:projectId/files/:fileId/extract-profile', async (req, r
 
 app.post('/api/projects/:projectId/steps/:stepId/generate', async (req, res) => {
   const db = await readDb();
+  if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
   const step = db.steps.find((item) => item.projectId === req.params.projectId && item.id === req.params.stepId);
   if (!step) return res.status(404).json({ error: 'Step not found' });
   const output = buildStepOutput(db, req.params.projectId, step);
@@ -1157,6 +1190,7 @@ app.post('/api/projects/:projectId/steps/:stepId/generate', async (req, res) => 
 
 app.put('/api/projects/:projectId/steps/:stepId/output/fields/:sectionId/:fieldKey', async (req, res) => {
   const db = await readDb();
+  if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
   const step = db.steps.find((item) => item.projectId === req.params.projectId && item.id === req.params.stepId);
   if (!step) return res.status(404).json({ error: 'Step not found' });
   if (!step.output?.structuredFields) return res.status(400).json({ error: 'Step output has not been generated' });
@@ -1181,6 +1215,7 @@ app.put('/api/projects/:projectId/steps/:stepId/output/fields/:sectionId/:fieldK
 
 app.post('/api/projects/:projectId/steps/:stepId/approve', async (req, res) => {
   const db = await readDb();
+  if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
   const step = db.steps.find((item) => item.projectId === req.params.projectId && item.id === req.params.stepId);
   if (!step) return res.status(404).json({ error: 'Step not found' });
   step.status = 'approved';
@@ -1197,6 +1232,7 @@ app.post('/api/projects/:projectId/steps/:stepId/approve', async (req, res) => {
 
 app.post('/api/projects/:projectId/documents/:documentId/action', async (req, res) => {
   const db = await readDb();
+  if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
   const doc = db.documents.find((item) => item.projectId === req.params.projectId && item.id === req.params.documentId);
   if (!doc) return res.status(404).json({ error: 'Document not found' });
   doc.status = req.body.action?.includes('Generate') ? 'generated' : 'actioned';
