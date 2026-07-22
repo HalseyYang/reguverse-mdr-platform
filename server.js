@@ -5,9 +5,10 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
+  finalizeProjectUpload,
   listActiveProjects,
   listDeletedProjects,
-  purgeProjectSafely,
+  purgeProjectTwoPhase,
   restoreProject,
   softDeleteProject
 } from './server/project-lifecycle.js';
@@ -242,7 +243,6 @@ async function requireActiveProjectRequest(req, res, next) {
   try {
     const db = await readDb();
     if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
-    req.projectDb = db;
     next();
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -254,11 +254,11 @@ async function purgeExpiredSafely(db, now) {
   const expiredIds = next.projects.filter((project) => project.deletedAt && new Date(project.purgeAt || project.deletedAt) <= now).map((project) => project.id);
   for (const id of expiredIds) {
     try {
-      const purged = await purgeProjectSafely(next, id, removeStoredUploads);
+      const purged = await purgeProjectTwoPhase(next, id, { now, writeDb, deleteUploads: removeStoredUploads });
       next = purged.db;
-      await writeDb(next);
     } catch (error) {
       console.error(`Expired project cleanup failed for ${id}: ${error.message}`);
+      next = await readDb();
     }
   }
   return next;
@@ -1037,8 +1037,7 @@ app.post('/api/projects/:projectId/restore', async (req, res) => {
 app.delete('/api/projects/:projectId/permanent', async (req, res) => {
   const db = await readDb();
   try {
-    const result = await purgeProjectSafely(db, req.params.projectId, removeStoredUploads);
-    await writeDb(result.db);
+    const result = await purgeProjectTwoPhase(db, req.params.projectId, { now: new Date(), writeDb, deleteUploads: removeStoredUploads });
     res.json({ project: result.project, fileCount: result.fileCount, deletedAt: result.project.deletedAt, purgeAt: result.project.purgeAt });
   } catch (error) {
     const status = error.message.startsWith('Project not found') ? 404 : 409;
@@ -1107,22 +1106,28 @@ app.put('/api/projects/:projectId/profile', async (req, res) => {
 });
 
 app.post('/api/projects/:projectId/files', requireActiveProjectRequest, upload.single('file'), async (req, res) => {
-  const db = req.projectDb;
-  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
-  if (!project) return;
   const file = {
     id: `file-${Date.now()}`,
-    projectId: project.id,
+    projectId: req.params.projectId,
     name: req.file?.originalname || req.body.name || 'Uploaded file',
     type: req.body.type || 'Context',
     note: req.body.note || '用户上传的项目上下文文件',
     storedName: req.file?.filename || null,
     uploadedAt: new Date().toISOString()
   };
-  db.files.push(file);
-  event(db, 'file.uploaded', `上传文件：${file.name}`, { projectId: project.id, fileId: file.id });
-  await writeDb(db);
-  res.status(201).json(file);
+  try {
+    await finalizeProjectUpload({
+      projectId: req.params.projectId,
+      file,
+      readDb,
+      writeDb,
+      deleteUploads: removeStoredUploads,
+      beforeWrite: (db) => event(db, 'file.uploaded', `上传文件：${file.name}`, { projectId: req.params.projectId, fileId: file.id })
+    });
+    res.status(201).json(file);
+  } catch (error) {
+    res.status(lifecycleErrorStatus(error)).json({ error: error.message });
+  }
 });
 
 app.post('/api/projects/:projectId/files/:fileId/extract-profile', async (req, res) => {

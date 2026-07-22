@@ -9,8 +9,10 @@ import {
   listActiveProjects,
   listDeleted,
   listDeletedProjects,
+  finalizeProjectUpload,
   prepareDeletedProjects,
   purgeProjectSafely,
+  purgeProjectTwoPhase,
   purgeExpiredProjects,
   restore,
   restoreProject,
@@ -145,4 +147,61 @@ test('API rejects stale access and invalid lifecycle transitions after soft dele
     await copyFile(backupPath, dbPath);
     await rm(backupPath, { force: true });
   }
+});
+
+test('two-phase purge does not delete files when the pending DB write fails', async () => {
+  const deleted = softDeleteProject(fixture(), 'alpha', NOW).db;
+  let deleteCalls = 0;
+  await assert.rejects(() => purgeProjectTwoPhase(deleted, 'alpha', {
+    now: NOW,
+    writeDb: async () => { throw new Error('db unavailable'); },
+    deleteUploads: async () => { deleteCalls += 1; }
+  }), /db unavailable/);
+  assert.equal(deleteCalls, 0);
+});
+
+test('two-phase purge keeps a pending project and references when file deletion fails', async () => {
+  const deleted = softDeleteProject(fixture(), 'alpha', NOW).db;
+  const writes = [];
+  await assert.rejects(() => purgeProjectTwoPhase(deleted, 'alpha', {
+    now: NOW,
+    writeDb: async (db) => { writes.push(structuredClone(db)); },
+    deleteUploads: async () => { throw new Error('file locked'); }
+  }), /file locked/);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].projects.find(({ id }) => id === 'alpha').purgePendingAt, NOW);
+  assert.deepEqual(writes[0].projects.find(({ id }) => id === 'alpha').pendingStoredNames, ['server-generated-a']);
+  assert.equal(writes[0].files.find(({ projectId }) => projectId === 'alpha').storedName, 'server-generated-a');
+  assert.throws(() => restore(writes[0], 'alpha'), /Project purge is pending: alpha/);
+});
+
+test('two-phase purge converges on retry after the final DB write fails', async () => {
+  const deleted = softDeleteProject(fixture(), 'alpha', NOW).db;
+  let persisted = deleted;
+  let writes = 0;
+  await assert.rejects(() => purgeProjectTwoPhase(deleted, 'alpha', {
+    now: NOW,
+    writeDb: async (db) => { writes += 1; if (writes === 2) throw new Error('final write failed'); persisted = structuredClone(db); },
+    deleteUploads: async () => {}
+  }), /final write failed/);
+  assert.ok(persisted.projects.find(({ id }) => id === 'alpha').purgePendingAt);
+  const retried = await purgeProjectTwoPhase(persisted, 'alpha', { now: NOW, writeDb: async (db) => { persisted = structuredClone(db); }, deleteUploads: async () => {} });
+  assert.equal(retried.db.projects.some(({ id }) => id === 'alpha'), false);
+  assert.equal(persisted.projects.some(({ id }) => id === 'alpha'), false);
+});
+
+test('upload finalization rechecks active state and cleans a concurrent upload without reviving project', async () => {
+  const deleted = softDeleteProject(fixture(), 'alpha', NOW).db;
+  const removed = [];
+  let writes = 0;
+  await assert.rejects(() => finalizeProjectUpload({
+    projectId: 'alpha',
+    file: { id: 'new', projectId: 'alpha', storedName: 'new-upload' },
+    readDb: async () => structuredClone(deleted),
+    writeDb: async () => { writes += 1; },
+    deleteUploads: async (names) => { removed.push(...names); }
+  }), /Project is deleted: alpha/);
+  assert.deepEqual(removed, ['new-upload']);
+  assert.equal(writes, 0);
+  assert.equal(deleted.projects.find(({ id }) => id === 'alpha').deletedAt, NOW);
 });

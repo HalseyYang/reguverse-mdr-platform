@@ -43,6 +43,7 @@ export function restoreProject(db, id) {
   const next = cloneDb(db);
   const project = requireProject(next, id);
   if (!project.deletedAt) throw new Error(`Project is not deleted: ${id}`);
+  if (project.purgePendingAt) throw new Error(`Project purge is pending: ${id}`);
   delete project.deletedAt;
   delete project.purgeAt;
   return { db: next, project: structuredClone(project), fileCount: (next.files || []).filter((file) => file.projectId === id).length };
@@ -68,6 +69,45 @@ export async function purgeProjectSafely(db, id, deleteUploads) {
   const purged = purgeProject(db, id);
   await deleteUploads(purged.uploadReferences);
   return purged;
+}
+
+export async function purgeProjectTwoPhase(db, id, { writeDb, deleteUploads, now }) {
+  let pendingDb = cloneDb(db);
+  const project = requireProject(pendingDb, id);
+  if (!project.deletedAt) throw new Error(`Project must be soft-deleted before permanent deletion: ${id}`);
+  if (!project.purgePendingAt) {
+    project.purgePendingAt = parseNow(now).toISOString();
+    project.pendingStoredNames = (pendingDb.files || [])
+      .filter((file) => file.projectId === id)
+      .map((file) => file.storedName)
+      .filter(Boolean);
+    await writeDb(pendingDb);
+  }
+  await deleteUploads(project.pendingStoredNames || []);
+  const purged = purgeProject(pendingDb, id);
+  await writeDb(purged.db);
+  return purged;
+}
+
+export async function finalizeProjectUpload({ projectId, file, readDb, writeDb, deleteUploads, beforeWrite }) {
+  const db = await readDb();
+  const project = db.projects?.find((item) => item.id === projectId);
+  if (!project || project.deletedAt) {
+    await deleteUploads([file.storedName].filter(Boolean));
+    if (!project) throw new Error(`Project not found: ${projectId}`);
+    throw new Error(`Project is deleted: ${projectId}`);
+  }
+  const next = cloneDb(db);
+  next.files ||= [];
+  next.files.unshift(structuredClone(file));
+  beforeWrite?.(next);
+  try {
+    await writeDb(next);
+  } catch (error) {
+    await deleteUploads([file.storedName].filter(Boolean));
+    throw error;
+  }
+  return { db: next, file: structuredClone(file) };
 }
 
 export function purgeExpiredProjects(db, now) {
