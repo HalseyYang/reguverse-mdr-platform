@@ -71,7 +71,7 @@ export async function purgeProjectSafely(db, id, deleteUploads) {
   return purged;
 }
 
-export async function purgeProjectTwoPhase(db, id, { writeDb, deleteUploads, now }) {
+export async function purgeProjectTwoPhase(db, id, { readDb, writeDb, deleteUploads, now }) {
   let pendingDb = cloneDb(db);
   const project = requireProject(pendingDb, id);
   if (!project.deletedAt) throw new Error(`Project must be soft-deleted before permanent deletion: ${id}`);
@@ -84,7 +84,12 @@ export async function purgeProjectTwoPhase(db, id, { writeDb, deleteUploads, now
     await writeDb(pendingDb);
   }
   await deleteUploads(project.pendingStoredNames || []);
-  const purged = purgeProject(pendingDb, id);
+  const latestDb = readDb ? await readDb() : pendingDb;
+  const latestProject = requireProject(latestDb, id);
+  if (!latestProject.deletedAt || latestProject.purgePendingAt !== project.purgePendingAt) {
+    throw new Error(`Project purge state changed: ${id}`);
+  }
+  const purged = purgeProject(latestDb, id);
   await writeDb(purged.db);
   return purged;
 }

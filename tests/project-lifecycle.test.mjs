@@ -205,3 +205,22 @@ test('upload finalization rechecks active state and cleans a concurrent upload w
   assert.equal(writes, 0);
   assert.equal(deleted.projects.find(({ id }) => id === 'alpha').deletedAt, NOW);
 });
+
+test('two-phase purge rereads latest DB and preserves another project update', async () => {
+  const deleted = softDeleteProject(fixture(), 'alpha', NOW).db;
+  let persisted = deleted;
+  let releaseDelete;
+  const deleting = new Promise((resolve) => { releaseDelete = resolve; });
+  const purgePromise = purgeProjectTwoPhase(deleted, 'alpha', {
+    now: NOW,
+    readDb: async () => structuredClone(persisted),
+    writeDb: async (db) => { persisted = structuredClone(db); },
+    deleteUploads: async () => deleting
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  persisted.projects.find(({ id }) => id === 'beta').title = 'Beta updated concurrently';
+  releaseDelete();
+  await purgePromise;
+  assert.equal(persisted.projects.find(({ id }) => id === 'beta').title, 'Beta updated concurrently');
+  assert.equal(persisted.projects.some(({ id }) => id === 'alpha'), false);
+});

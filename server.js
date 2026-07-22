@@ -31,6 +31,31 @@ const upload = multer({ dest: uploadDir });
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
+let dbMutationTail = Promise.resolve();
+
+function withDbMutation(mutator) {
+  const run = dbMutationTail.then(mutator);
+  dbMutationTail = run.catch(() => {});
+  return run;
+}
+
+app.use((req, res, next) => {
+  const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+  const isUpload = req.method === 'POST' && /^\/api\/projects\/[^/]+\/files$/.test(req.path);
+  if (!isMutation || isUpload) return next();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const previous = dbMutationTail;
+  dbMutationTail = gate;
+  previous.then(() => {
+    let released = false;
+    const unlock = () => { if (!released) { released = true; release(); } };
+    res.once('finish', unlock);
+    res.once('close', unlock);
+    next();
+  });
+});
+
 const seed = {
   projects: [
     {
@@ -249,19 +274,21 @@ async function requireActiveProjectRequest(req, res, next) {
   }
 }
 
-async function purgeExpiredSafely(db, now) {
-  let next = db;
-  const expiredIds = next.projects.filter((project) => project.deletedAt && new Date(project.purgeAt || project.deletedAt) <= now).map((project) => project.id);
-  for (const id of expiredIds) {
-    try {
-      const purged = await purgeProjectTwoPhase(next, id, { now, writeDb, deleteUploads: removeStoredUploads });
-      next = purged.db;
-    } catch (error) {
-      console.error(`Expired project cleanup failed for ${id}: ${error.message}`);
-      next = await readDb();
+async function purgeExpiredSafely(now) {
+  return withDbMutation(async () => {
+    let next = await readDb();
+    const expiredIds = next.projects.filter((project) => project.deletedAt && new Date(project.purgeAt || project.deletedAt) <= now).map((project) => project.id);
+    for (const id of expiredIds) {
+      try {
+        const purged = await purgeProjectTwoPhase(next, id, { now, readDb, writeDb, deleteUploads: removeStoredUploads });
+        next = purged.db;
+      } catch (error) {
+        console.error(`Expired project cleanup failed for ${id}: ${error.message}`);
+        next = await readDb();
+      }
     }
-  }
-  return next;
+    return next;
+  });
 }
 
 function event(db, type, message, meta = {}) {
@@ -945,14 +972,12 @@ app.post('/api/profile-extractions/preview', upload.single('file'), async (req, 
 });
 
 app.get('/api/projects', async (req, res) => {
-  let db = await readDb();
-  db = await purgeExpiredSafely(db, new Date());
+  const db = await purgeExpiredSafely(new Date());
   res.json(listActiveProjects(db));
 });
 
 app.get('/api/projects/deleted', async (req, res) => {
-  let db = await readDb();
-  db = await purgeExpiredSafely(db, new Date());
+  const db = await purgeExpiredSafely(new Date());
   res.json(listDeletedProjects(db));
 });
 
@@ -1037,7 +1062,7 @@ app.post('/api/projects/:projectId/restore', async (req, res) => {
 app.delete('/api/projects/:projectId/permanent', async (req, res) => {
   const db = await readDb();
   try {
-    const result = await purgeProjectTwoPhase(db, req.params.projectId, { now: new Date(), writeDb, deleteUploads: removeStoredUploads });
+    const result = await purgeProjectTwoPhase(db, req.params.projectId, { now: new Date(), readDb, writeDb, deleteUploads: removeStoredUploads });
     res.json({ project: result.project, fileCount: result.fileCount, deletedAt: result.project.deletedAt, purgeAt: result.project.purgeAt });
   } catch (error) {
     const status = error.message.startsWith('Project not found') ? 404 : 409;
@@ -1116,14 +1141,14 @@ app.post('/api/projects/:projectId/files', requireActiveProjectRequest, upload.s
     uploadedAt: new Date().toISOString()
   };
   try {
-    await finalizeProjectUpload({
-      projectId: req.params.projectId,
-      file,
-      readDb,
-      writeDb,
-      deleteUploads: removeStoredUploads,
-      beforeWrite: (db) => event(db, 'file.uploaded', `上传文件：${file.name}`, { projectId: req.params.projectId, fileId: file.id })
-    });
+    await withDbMutation(() => finalizeProjectUpload({
+        projectId: req.params.projectId,
+        file,
+        readDb,
+        writeDb,
+        deleteUploads: removeStoredUploads,
+        beforeWrite: (db) => event(db, 'file.uploaded', `上传文件：${file.name}`, { projectId: req.params.projectId, fileId: file.id })
+      }));
     res.status(201).json(file);
   } catch (error) {
     res.status(lifecycleErrorStatus(error)).json({ error: error.message });
