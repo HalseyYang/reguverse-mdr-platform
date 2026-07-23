@@ -47,12 +47,7 @@ import { profileFor, incompatiblePopulatedFieldsWithAliases, clearIncompatibleMa
 import { canVisitStep, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, readStoredProfileDraft, savePlanForStepAction, writeStoredProfileDraft } from './features/device-profile/profile-navigation.js';
 
 const navItems = [
-  { id: 'dashboard', label: '总览', icon: Activity },
-  { id: 'documents', label: '文档生成', icon: Files },
-  { id: 'knowledge', label: '法规知识库', icon: Library },
-  { id: 'tools', label: 'AI 工具', icon: Sparkles },
-  { id: 'team', label: '团队与权限', icon: UsersRound },
-  { id: 'architecture', label: '系统架构', icon: Network }
+  { id: 'dashboard', label: '总览', icon: Activity }
 ];
 
 const seedProjects = [
