@@ -43,7 +43,7 @@ import {
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
 import { HongKongRegistrationTask } from './features/hong-kong-registration/HongKongRegistrationTask.jsx';
 import { profileFor, incompatiblePopulatedFieldsWithAliases, clearIncompatibleMarketFields, normalizeMarketProfile, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway, wizardSectionsFor } from './features/device-profile/market-profile-configurations.js';
-import { canVisitStep, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, readStoredProfileDraft, savePlanForStepAction, writeStoredProfileDraft } from './features/device-profile/profile-navigation.js';
+import { canVisitStep, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, readStoredProfileDraft, savePlanForStepAction, stepValidationMessage, writeStoredProfileDraft } from './features/device-profile/profile-navigation.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity }
@@ -856,6 +856,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   const [savedAt, setSavedAt] = useState(null);
   const [candidateEdits, setCandidateEdits] = useState({});
   const [pendingRegionChange, setPendingRegionChange] = useState(null);
+  const [navigationValidationMessage, setNavigationValidationMessage] = useState('');
   const draftStorageKey = `reguverse-profile-draft-${mode === 'create' ? 'create' : projectId || 'unknown'}`;
 
   useEffect(() => {
@@ -933,6 +934,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   const finalStep = isFinalStep(navigationSteps, activeSection);
 
   const updateField = (sectionId, key, value) => {
+    setNavigationValidationMessage('');
     if (sectionId === 'basics' && key === 'regulation') {
       const incompatible = incompatiblePopulatedFieldsWithAliases(draft.basics?.regulation, value, draft);
       if (incompatible.length) {
@@ -1067,28 +1069,36 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     const result = canVisitStep({ steps: navigationSteps, targetStep, visited: visitedSteps, missingByStep });
     if (!result.allowed) {
       setActiveSection(result.blockedStep);
+      setNavigationValidationMessage(stepValidationMessage(result.missing));
       notify(`请先补齐当前步骤的 ${result.missing.length} 项必填字段。`);
       return;
     }
+    setNavigationValidationMessage('');
     setActiveSection(targetStep);
     setVisitedSteps((current) => [...new Set([...current, targetStep])]);
   };
 
   const goBack = () => {
     const target = previousStep(navigationSteps, activeSection);
-    if (target) setActiveSection(target);
+    if (target) {
+      setNavigationValidationMessage('');
+      setActiveSection(target);
+    }
   };
 
   const advance = async () => {
     const result = nextStep({ steps: navigationSteps, activeStep: activeSection, missingByStep, visited: visitedSteps });
     if (result.action === 'invalid') {
+      setNavigationValidationMessage('当前步骤无效，请重新打开设备画像。');
       notify('当前步骤无效，请重新打开设备画像。');
       return;
     }
     if (result.action === 'missing') {
+      setNavigationValidationMessage(stepValidationMessage(result.missing));
       notify(`当前步骤还有 ${result.missing.length} 项必填字段缺失。`);
       return;
     }
+    setNavigationValidationMessage('');
     const localSaved = saveRecoveryDraft();
     const plan = savePlanForStepAction({ mode, action: 'next' });
     if (plan.server) {
@@ -1113,11 +1123,14 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
 
   const saveProfile = async () => {
     if (missingWithOverrides.length) {
+      const firstMissingStepId = navigationStepIdForDataSection(navigationSteps, missingWithOverrides[0].sectionId);
+      setNavigationValidationMessage(stepValidationMessage(missingByStep[firstMissingStepId] || missingWithOverrides));
       notify(`还有 ${missingWithOverrides.length} 项必填字段缺失，请补齐后再${mode === 'create' ? '创建项目' : '保存画像'}。`);
-      setActiveSection(navigationStepIdForDataSection(navigationSteps, missingWithOverrides[0].sectionId));
+      setActiveSection(firstMissingStepId);
       return;
     }
     if (hasHongKongClassificationMismatch && !String(draft.basics?.hong_kong_classification_override_reason || '').trim()) {
+      setNavigationValidationMessage('请填写：类别调整理由');
       notify('器械类别与系统推荐不一致，请填写修改类别的理由后再继续。');
       setActiveSection('basics');
       return;
@@ -1264,6 +1277,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
         </div>
       )}
       <footer className="profile-navigation-footer">
+        {navigationValidationMessage && <div className="profile-navigation-validation" role="alert">{navigationValidationMessage}</div>}
         <button className="secondary-btn" disabled={!previousStep(navigationSteps, activeSection)} onClick={goBack}>上一步</button>
         <div className="profile-footer-actions">
           <div className="profile-save-state">

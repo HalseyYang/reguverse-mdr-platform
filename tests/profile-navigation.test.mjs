@@ -7,6 +7,7 @@ import {
   isFinalStep,
   navigationStepIdForDataSection,
   canVisitStep,
+  stepValidationMessage,
   savePlanForStepAction,
   readStoredProfileDraft,
   writeStoredProfileDraft
@@ -56,6 +57,18 @@ test('nextStep stays put and reports only current-step missing fields', () => {
     step: 'basics',
     missing: missingByStep.basics
   });
+});
+
+test('step validation message names the missing fields beside the navigation buttons', () => {
+  assert.equal(
+    stepValidationMessage([
+      { key: 'application_type', label: '申请路径' },
+      { key: 'relies_on_other_market_approval', label: '是否依赖其他市场批准' }
+    ]),
+    '请填写：申请路径、是否依赖其他市场批准'
+  );
+  assert.equal(stepValidationMessage([{ key: 'product_name' }]), '请填写：product_name');
+  assert.equal(stepValidationMessage([]), '');
 });
 
 test('nextStep safely rejects empty steps and an unknown active step', () => {

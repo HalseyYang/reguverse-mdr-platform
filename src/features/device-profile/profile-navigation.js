@@ -29,6 +29,12 @@ export function nextStep({ steps, activeStep, missingByStep, visited }) {
   };
 }
 
+export function stepValidationMessage(missing = []) {
+  if (!missing.length) return '';
+  const fieldNames = missing.map((item) => item.label || item.key).filter(Boolean);
+  return fieldNames.length ? `请填写：${fieldNames.join('、')}` : `当前步骤还有 ${missing.length} 项必填字段缺失`;
+}
+
 export function canVisitStep({ steps, targetStep, visited, missingByStep }) {
   const targetIndex = stepIndex(steps, targetStep);
   if (targetIndex < 0) return { allowed: false, reason: 'unknown-step' };
