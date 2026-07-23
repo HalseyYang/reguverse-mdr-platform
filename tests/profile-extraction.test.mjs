@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { copyFile, mkdir, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
@@ -25,6 +26,18 @@ async function waitForApi() {
     }
   }
   throw new Error('API did not start for test');
+}
+
+async function listen(server, port) {
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', resolve);
+  });
+}
+
+async function closeServer(server) {
+  server.closeAllConnections?.();
+  await new Promise((resolve) => server.close(resolve));
 }
 
 test('extracts reviewable profile candidates from uploaded context file without changing saved profile', async () => {
@@ -215,5 +228,159 @@ test('extracts profile candidates from natural-language device documentation', a
     await wait(100);
     await copyFile(backupPath, dbPath);
     await rm(backupPath, { force: true });
+  }
+});
+
+test('manual-like extraction rejects maintenance and EMC false positives while using authoritative sections', async () => {
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: process.cwd(),
+    env: { ...process.env, PORT: String(port), DISABLE_AI_EXTRACTION: '1' },
+    stdio: 'ignore'
+  });
+
+  try {
+    await waitForApi();
+    const form = new FormData();
+    const text = [
+      '0476',
+      'Diode Laser Hair Removal Machine',
+      'GLD01/GLD10/GLD16/GLD19/GLD26 Model',
+      'User Manual',
+      'All rights reserved. Without permission of Beijing Goldenlaser Development Co., Ltd, this manual may not be copied.',
+      '',
+      'Intended Use',
+      'The Diode Laser Hair Removal Machine is intended for the removal of unwanted hair and to effect stable, long-term hair reduction.',
+      '',
+      'Routine Maintenance',
+      'This diode laser hair removal system is a precision medical device. Regular and proper maintenance is essential.',
+      '',
+      'RF emissions CISPR 11',
+      'Class A',
+      'The device is suitable for use in establishments other than domestic establishments.',
+      '',
+      'Symbols',
+      'Manufacturer',
+      'Voltage',
+      '',
+      'Manufacturer and Contact Information',
+      'Manufacture: Beijing Goldenlaser Development Co., Ltd',
+      'Address: A2-53A, No. 65, South Third Ring Road West, Fengtai District, Beijing China'
+    ].join('\n');
+    form.append('file', new Blob([text], { type: 'text/plain' }), 'diode-laser-user-manual.txt');
+
+    const response = await fetch(`${baseUrl}/profile-extractions/preview`, { method: 'POST', body: form });
+    assert.equal(response.status, 201);
+    const extraction = await response.json();
+    const candidate = (fieldKey) => extraction.candidates.find((item) => item.fieldKey === fieldKey);
+
+    assert.equal(candidate('productName')?.value, 'Diode Laser Hair Removal Machine');
+    assert.equal(candidate('genericName')?.value, 'Diode Laser Hair Removal Machine');
+    assert.equal(candidate('deviceClass'), undefined);
+    assert.equal(candidate('manufacturer')?.value, 'Beijing Goldenlaser Development Co., Ltd');
+    assert.equal(candidate('manufacturerAddress')?.value, 'A2-53A, No. 65, South Third Ring Road West, Fengtai District, Beijing China');
+    assert.match(candidate('intendedUse')?.sourceSnippet || '', /intended for the removal of unwanted hair/i);
+  } finally {
+    child.kill();
+    await wait(100);
+  }
+});
+
+test('AI extraction input includes labeled evidence from the end of a long document', async () => {
+  const fakeAiPort = 18880;
+  let capturedPayload = null;
+  const fakeAiServer = createServer((request, response) => {
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      capturedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ choices: [{ message: { content: '{}' } }] }));
+    });
+  });
+  await listen(fakeAiServer, fakeAiPort);
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DISABLE_AI_EXTRACTION: '0',
+      AI_PROVIDER: 'openai',
+      OPENAI_API_KEY: 'test-key',
+      AI_BASE_URL: `http://127.0.0.1:${fakeAiPort}`,
+      AI_PROFILE_TIMEOUT_MS: '1000'
+    },
+    stdio: 'ignore'
+  });
+
+  try {
+    await waitForApi();
+    const form = new FormData();
+    const longText = [
+      'Diode Laser Hair Removal Machine',
+      'Model GLD01',
+      'User Manual',
+      `Background ${'x'.repeat(22000)}`,
+      'Manufacturer and Contact Information',
+      'Manufacturer: Late Evidence Medical Device Co., Ltd',
+      'Address: 88 Evidence Road, Hong Kong'
+    ].join('\n');
+    form.append('file', new Blob([longText], { type: 'text/plain' }), 'long-manual.txt');
+
+    const response = await fetch(`${baseUrl}/profile-extractions/preview`, { method: 'POST', body: form });
+    assert.equal(response.status, 201);
+    const promptPayload = JSON.parse(capturedPayload.messages[1].content);
+    assert.match(promptPayload.documentText, /Late Evidence Medical Device Co\., Ltd/);
+    assert.ok(promptPayload.documentText.length <= 18000);
+  } finally {
+    child.kill();
+    await wait(100);
+    await closeServer(fakeAiServer);
+  }
+});
+
+test('AI extraction times out and returns rule candidates instead of waiting indefinitely', async () => {
+  const fakeAiPort = 18881;
+  const fakeAiServer = createServer((request, response) => {
+    request.resume();
+    request.on('end', () => {
+      setTimeout(() => {
+        if (response.destroyed) return;
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ choices: [{ message: { content: '{}' } }] }));
+      }, 500);
+    });
+  });
+  await listen(fakeAiServer, fakeAiPort);
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DISABLE_AI_EXTRACTION: '0',
+      AI_PROVIDER: 'openai',
+      OPENAI_API_KEY: 'test-key',
+      AI_BASE_URL: `http://127.0.0.1:${fakeAiPort}`,
+      AI_PROFILE_TIMEOUT_MS: '75'
+    },
+    stdio: 'ignore'
+  });
+
+  try {
+    await waitForApi();
+    const form = new FormData();
+    form.append('file', new Blob(['Product Name: Timeout Fallback Device'], { type: 'text/plain' }), 'timeout-profile.txt');
+    const startedAt = Date.now();
+    const response = await fetch(`${baseUrl}/profile-extractions/preview`, { method: 'POST', body: form });
+    const elapsedMilliseconds = Date.now() - startedAt;
+    const extraction = await response.json();
+
+    assert.equal(response.status, 201);
+    assert.ok(elapsedMilliseconds < 400, `expected timeout fallback below 400 ms, received ${elapsedMilliseconds} ms`);
+    assert.match(extraction.aiError || '', /timed out after 75 ms/i);
+    assert.ok(extraction.candidates.some((item) => item.fieldKey === 'productName' && item.value === 'Timeout Fallback Device'));
+  } finally {
+    child.kill();
+    await wait(100);
+    await closeServer(fakeAiServer);
   }
 });

@@ -4,9 +4,22 @@ import fs from 'fs/promises';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  finalizeProjectUpload,
+  listActiveProjects,
+  listDeletedProjects,
+  purgeProjectTwoPhase,
+  restoreProject,
+  softDeleteProject
+} from './server/project-lifecycle.js';
+import { validateMarketProfile } from './server/market-profile-validation.js';
+import { createHongKongRegistrationRouter } from './server/hong-kong-registration/routes.js';
+import { createHongKongRegistrationStore } from './server/hong-kong-registration/store.js';
+import { normalizeMarketProfile, profileFor } from './src/features/device-profile/market-profile-configurations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, 'data');
+const hongKongRegistrationStore = createHongKongRegistrationStore({ dataRoot: dataDir });
 const uploadDir = path.join(dataDir, 'uploads');
 const dbPath = path.join(dataDir, 'db.json');
 const envPath = path.join(__dirname, '.env');
@@ -27,6 +40,31 @@ const allowedRegulatoryKnowledgeBaseNames = new Set([
   '医疗器械国内注册汇总知识库',
   '医疗器械国际认证汇总知识库'
 ]);
+
+let dbMutationTail = Promise.resolve();
+
+function withDbMutation(mutator) {
+  const run = dbMutationTail.then(mutator);
+  dbMutationTail = run.catch(() => {});
+  return run;
+}
+
+app.use((req, res, next) => {
+  const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+  const isUpload = req.method === 'POST' && /^\/api\/projects\/[^/]+\/files$/.test(req.path);
+  if (!isMutation || isUpload) return next();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const previous = dbMutationTail;
+  dbMutationTail = gate;
+  previous.then(() => {
+    let released = false;
+    const unlock = () => { if (!released) { released = true; release(); } };
+    res.once('finish', unlock);
+    res.once('close', unlock);
+    next();
+  });
+});
 
 const seed = {
   projects: [
@@ -182,6 +220,21 @@ const clinicalEvaluationDocuments = [
 
 const taskTemplates = [
   {
+    id: 'nmpa-registration',
+    title: 'NMPA Registration',
+    description: 'NMPA registration dossier preparation task.'
+  },
+  {
+    id: 'fda-market-submission',
+    title: 'FDA Market Submission',
+    description: 'FDA premarket submission preparation task; establishment registration and device listing are not product approvals.'
+  },
+  {
+    id: 'hong-kong-document-revision',
+    title: '香港注册文件修订',
+    description: 'Revise an uploaded source document for Hong Kong MDACS submission and produce an editable DOCX draft.'
+  },
+  {
     id: 'clinical-evaluation',
     title: 'Clinical Evaluation',
     description: 'EU MDR clinical evaluation workflow with 10 steps and CER/CEP/DCR outputs.'
@@ -229,6 +282,74 @@ async function writeDb(db) {
   await fs.writeFile(dbPath, JSON.stringify(db, null, 2));
 }
 
+async function removeStoredUploads(storedNames = []) {
+  await Promise.all(storedNames.map(async (storedName) => {
+    if (!storedName || path.basename(storedName) !== storedName) return;
+    const target = path.resolve(uploadDir, storedName);
+    if (path.dirname(target) !== path.resolve(uploadDir)) return;
+    await fs.rm(target, { force: true });
+  }));
+}
+
+function findActiveProjectOrRespond(db, projectId, res) {
+  const project = db.projects.find((item) => item.id === projectId);
+  if (!project) {
+    res.status(404).json({ error: `Project not found: ${projectId}` });
+    return null;
+  }
+  if (project.deletedAt) {
+    res.status(409).json({ error: `Project is deleted: ${projectId}` });
+    return null;
+  }
+  return project;
+}
+
+function lifecycleErrorStatus(error) {
+  return error.message.startsWith('Project not found') ? 404 : 409;
+}
+
+async function requireActiveProjectRequest(req, res, next) {
+  try {
+    const db = await readDb();
+    if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
+    next();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}
+
+app.use('/api/projects/:projectId/hong-kong-registration', createHongKongRegistrationRouter({
+  store: hongKongRegistrationStore,
+  requireProjectAccess: async (projectId) => {
+    const db = await readDb();
+    const project = db.projects.find((item) => item.id === projectId);
+    return {
+      project,
+      hasHongKongTask: db.tasks.some((task) => task.projectId === projectId && task.title === '香港注册文件修订')
+    };
+  }
+}));
+
+async function purgeExpiredSafely(now) {
+  return withDbMutation(async () => {
+    let next = await readDb();
+    const expiredIds = next.projects.filter((project) => project.deletedAt && new Date(project.purgeAt || project.deletedAt) <= now).map((project) => project.id);
+    for (const id of expiredIds) {
+      try {
+        const purged = await purgeProjectTwoPhase(next, id, {
+          now, readDb, writeDb, deleteUploads: removeStoredUploads,
+          cleanupProjectStorage: hongKongRegistrationStore.cleanupProjectStorage
+        });
+        next = purged.db;
+      } catch (error) {
+        console.error(`Expired project cleanup failed for ${id}: ${error.message}`);
+        next = await readDb();
+      }
+    }
+    return next;
+  });
+}
+
 function event(db, type, message, meta = {}) {
   db.events.unshift({
     id: `evt-${Date.now()}`,
@@ -259,14 +380,40 @@ function missingProfileFields(profile = {}) {
 }
 
 function profileProjectFields(profile) {
-  const product = profile.basics?.productName || 'New Device';
+  const product = profile.basics?.product_name || profile.basics?.productName;
+  const region = profile.basics?.regulation;
+  const regionClass = region === 'FDA' ? profile.basics?.united_states_fda_device_class
+    : region === '香港注册（MDACS）' ? profile.basics?.hong_kong_device_class
+      : region === 'EU MDR' ? profile.basics?.eu_mdr_device_class : profile.basics?.nmpa_device_class;
   return {
-    title: `EU MDR CER - ${product}`,
+    title: `${region} - ${product}`,
     product,
-    market: profile.basics?.regulation || 'EU MDR',
-    deviceClass: profile.basics?.deviceClass || 'Class IIa',
-    manufacturer: profile.company?.manufacturer || 'New Manufacturer'
+    market: region,
+    deviceClass: regionClass,
+    manufacturer: profile.company?.manufacturer_full_name || profile.company?.manufacturer
   };
+}
+
+const hongKongRecommendedClasses = {
+  RULE_2_NON_INVASIVE: 'Class II',
+  RULE_5_INVASIVE: 'Class II',
+  RULE_6_SURGICALLY_INVASIVE_TRANSIENT: 'Class II',
+  RULE_7_SURGICALLY_INVASIVE_SHORT_TERM: 'Class III',
+  RULE_8_IMPLANTABLE_LONG_TERM: 'Class IV',
+  RULE_9_ACTIVE_THERAPEUTIC: 'Class II',
+  RULE_10_ACTIVE_DIAGNOSTIC: 'Class II',
+  RULE_12_OTHER_ACTIVE: 'Class II'
+};
+
+function missingHongKongClassificationOverrideReason(profile = {}) {
+  if (profile.basics?.regulation !== '香港注册（MDACS）') return false;
+  const recommendedClass = hongKongRecommendedClasses[profile.basics?.classificationRule];
+  const isOverride = recommendedClass && recommendedClass !== profile.basics?.deviceClass;
+  return Boolean(isOverride && !String(profile.basics?.classificationMismatchReason || '').trim());
+}
+
+function initializeHongKongDocumentRevisionTask(db, projectId) {
+  return createTaskFromTemplate(db, projectId, 'hong-kong-document-revision');
 }
 
 function initializeClinicalEvaluationWorkflow(db, projectId) {
@@ -347,8 +494,39 @@ function snippetAround(text, value) {
   const cleanValue = compactText(value);
   if (!cleanValue) return cleanText.slice(0, 180);
   const index = cleanText.toLowerCase().indexOf(cleanValue.toLowerCase());
-  if (index < 0) return cleanText.slice(0, 180);
+  if (index < 0) return '';
   return cleanText.slice(Math.max(0, index - 70), Math.min(cleanText.length, index + cleanValue.length + 90));
+}
+
+function authoritativeSnippetAround(text, value, fieldKey) {
+  const cleanText = compactText(text);
+  const cleanValue = compactText(value);
+  if (!cleanValue) return '';
+  const lowerText = cleanText.toLowerCase();
+  const lowerValue = cleanValue.toLowerCase();
+  let index = lowerText.indexOf(lowerValue);
+  const snippets = [];
+  while (index >= 0) {
+    snippets.push(cleanText.slice(Math.max(0, index - 100), Math.min(cleanText.length, index + cleanValue.length + 120)));
+    index = lowerText.indexOf(lowerValue, index + lowerValue.length);
+  }
+  if (!snippets.length) return '';
+  if (fieldKey === 'manufacturer') {
+    const labeledValuePattern = new RegExp(
+      `\\b(?:(?:legal\\s+)?manufacturer(?:\\s+name)?|manufacture)\\s*[:：\\-–—]?\\s*${escapeRegExp(cleanValue)}`,
+      'i'
+    );
+    const labeledValueMatch = cleanText.match(labeledValuePattern);
+    if (!labeledValueMatch || labeledValueMatch.index === undefined) return '';
+    return cleanText.slice(
+      Math.max(0, labeledValueMatch.index - 70),
+      Math.min(cleanText.length, labeledValueMatch.index + labeledValueMatch[0].length + 90)
+    );
+  }
+  if (fieldKey === 'manufacturerAddress') {
+    return snippets.find((snippet) => /\baddress\s*[:：\-–—]/i.test(snippet)) || '';
+  }
+  return snippets[0];
 }
 
 function aiExtractionConfigured() {
@@ -759,55 +937,112 @@ const aiCandidateMap = {
   manufacturerAddress: ['company', 'manufacturerAddress', '制造商地址']
 };
 
+const aiExtractionEvidenceHeadingPattern = /^(?:\d+(?:\.\d+)*[\s.)-]*)?(?:product name|device name|trade name|commercial name|name of device|generic name|device generic name|common name|device description|product description|device class|risk class|mdr classification|medical device class|classification under mdr|classification rule|applicable rule|classification rationale|intended use|intended purpose|purpose of use|indications?(?: for use)?|patient population|target population|intended (?:patient|user|operator)|target user|use environment|environment of use|use setting|clinical setting|principle of operation|operating principle|mode of action|working principle|clinical study summary|clinical evidence summary|legal manufacturer|manufacturer name|manufacturer(?: and contact)? information|manufacture|manufacturer address|registered address|address)\b/i;
+
+function boundedDocumentLines(lines, maximumLength) {
+  const selected = [];
+  let currentLength = 0;
+  for (const line of lines) {
+    const boundedLine = compactText(line).slice(0, 1600);
+    if (!boundedLine) continue;
+    if (currentLength + boundedLine.length + 1 > maximumLength) break;
+    selected.push(boundedLine);
+    currentLength += boundedLine.length + 1;
+  }
+  return selected.join('\n');
+}
+
+function buildAiExtractionDocumentText(text, maximumLength = 18000) {
+  const lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const compactDocument = compactText(text);
+  if (compactDocument.length <= maximumLength) return lines.join('\n');
+
+  const leadingContext = boundedDocumentLines(lines.slice(0, 24), 4000);
+  const evidenceLineIndexes = new Set();
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!aiExtractionEvidenceHeadingPattern.test(lines[index])) continue;
+    for (let nearbyIndex = Math.max(0, index - 1); nearbyIndex <= Math.min(lines.length - 1, index + 6); nearbyIndex += 1) {
+      evidenceLineIndexes.add(nearbyIndex);
+    }
+  }
+  const evidenceContext = boundedDocumentLines(
+    [...evidenceLineIndexes].sort((left, right) => left - right).map((index) => lines[index]),
+    12000
+  );
+  const endingContext = boundedDocumentLines(lines.slice(-12), 1800);
+  return [leadingContext, evidenceContext, endingContext].filter(Boolean).join('\n\n').slice(0, maximumLength);
+}
+
+function aiProfileExtractionTimeoutMilliseconds() {
+  const configured = Number.parseInt(process.env.AI_PROFILE_TIMEOUT_MS || '', 10);
+  if (Number.isFinite(configured) && configured >= 50 && configured <= 120000) return configured;
+  return 45000;
+}
+
 async function extractProfileCandidatesWithAi(text) {
   if (!aiExtractionConfigured()) return [];
   const config = aiConfig();
-  const response = await fetch(`${config.baseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: config.model,
-      temperature: 0,
-      max_tokens: 1800,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: [
-            'Extract medical device profile fields from the provided document.',
-            'Return only JSON. Example JSON: {"productName":null,"genericName":null,"deviceClass":null,"classificationRule":null,"intendedUse":null,"indications":null,"targetPopulation":null,"intendedUsers":null,"useEnvironment":null,"operatingPrinciple":null,"clinicalStudySummary":null,"manufacturer":null,"manufacturerAddress":null}.',
-            'Use null when a field is not supported by the text.',
-            'Do not invent values. Prefer exact wording from the document.'
-          ].join(' ')
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            fields: Object.keys(aiCandidateMap),
-            documentText: compactText(text).slice(0, 18000)
-          })
-        }
-      ]
-    })
-  });
+  const timeoutMilliseconds = aiProfileExtractionTimeoutMilliseconds();
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), timeoutMilliseconds);
+  let response;
+  try {
+    response = await fetch(`${config.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      signal: abortController.signal,
+      body: JSON.stringify({
+        model: config.model,
+        temperature: 0,
+        max_tokens: 1800,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'Extract medical device profile fields from the provided document.',
+              'Return only JSON. Example JSON: {"productName":null,"genericName":null,"deviceClass":null,"classificationRule":null,"intendedUse":null,"indications":null,"targetPopulation":null,"intendedUsers":null,"useEnvironment":null,"operatingPrinciple":null,"clinicalStudySummary":null,"manufacturer":null,"manufacturerAddress":null}.',
+              'Use null when a field is not supported by the text.',
+              'Do not invent values. Prefer exact wording from the document.'
+            ].join(' ')
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              fields: Object.keys(aiCandidateMap),
+              documentText: buildAiExtractionDocumentText(text)
+            })
+          }
+        ]
+      })
+    });
+  } catch (error) {
+    if (abortController.signal.aborted) {
+      throw new Error(`AI extraction timed out after ${timeoutMilliseconds} ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!response.ok) throw new Error(`AI extraction failed: ${response.status}`);
   const payload = await response.json();
   const parsed = JSON.parse(payload.choices?.[0]?.message?.content || '{}');
   return Object.entries(aiCandidateMap).flatMap(([jsonKey, [sectionId, fieldKey, label]]) => {
     const value = cleanExtractedValue(parsed[jsonKey] || '');
     if (!value) return [];
-    return [{
+    const candidate = {
       sectionId,
       fieldKey,
       label,
       value,
       confidence: 0.92,
       source: 'ai',
-      sourceSnippet: snippetAround(text, value)
-    }];
+      sourceSnippet: authoritativeSnippetAround(text, value, fieldKey)
+    };
+    return candidateHasAuthoritativeEvidence(candidate, text) ? [candidate] : [];
   });
 }
 
@@ -841,6 +1076,60 @@ function findHeadingBlock(lines, index, allLabels) {
   return cleanExtractedValue(block.join(' ')).slice(0, 520);
 }
 
+function findManualProductTitle(lines) {
+  const firstPageLines = lines.slice(0, 16);
+  for (let index = 0; index < firstPageLines.length; index += 1) {
+    const line = firstPageLines[index];
+    if (!/\b(?:machine|system|device|instrument|apparatus|software)\b$/i.test(line)) continue;
+    const following = firstPageLines.slice(index + 1, index + 4).join(' ');
+    if (/\bmodel\b/i.test(following) && /\b(?:user manual|instructions? for use|ifu)\b/i.test(following)) {
+      return cleanExtractedValue(line);
+    }
+  }
+  return '';
+}
+
+function findManufacturerAddress(lines) {
+  const sectionIndex = lines.findIndex((line) => /^Manufacturer(?:\s+and\s+Contact)?\s+Information\s*$/i.test(line));
+  if (sectionIndex < 0) return '';
+  for (const line of lines.slice(sectionIndex + 1, sectionIndex + 10)) {
+    const match = line.match(/^Address\s*[:：\-–—]\s*(.+)$/i);
+    if (match) return cleanExtractedValue(match[1]);
+  }
+  return '';
+}
+
+function candidateHasAuthoritativeEvidence(candidate, text) {
+  const value = cleanExtractedValue(candidate?.value || '');
+  const sourceSnippet = candidate?.sourceSnippet || authoritativeSnippetAround(text, value, candidate?.fieldKey);
+  if (!value || !sourceSnippet) return false;
+  const context = sourceSnippet.toLowerCase();
+
+  if (candidate.fieldKey === 'genericName') {
+    if (/\b(?:routine|preventive)\s+maintenance\b|\bmaintenance\s+(?:is|shall|must)\b/i.test(sourceSnippet)) return false;
+    const lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const manualTitle = findManualProductTitle(lines);
+    const hasGenericNameLabel = /\b(?:generic name|device generic name|common name|device description|product description)\b/i.test(sourceSnippet);
+    return value.toLowerCase() === manualTitle.toLowerCase() || hasGenericNameLabel;
+  }
+
+  if (candidate.fieldKey === 'deviceClass') {
+    if (/\b(?:cispr|rf emissions?|electromagnetic|fitzpatrick|skin phototype|electric shock|protection against)\b/i.test(sourceSnippet)) return false;
+    return /\b(?:device|medical device|risk|mdr)\s+class(?:ification)?\b|\b(?:mdr|medical device|risk)\s+classification\b/i.test(sourceSnippet);
+  }
+
+  if (candidate.fieldKey === 'manufacturer') {
+    const organizationName = /\b(?:co\.?,?\s*ltd\.?|ltd\.?|company|inc\.?|corp\.?|corporation|gmbh|limited|llc|s\.?a\.?|plc)\b/i.test(value);
+    return organizationName && /\bmanufactur(?:e|er)\b/i.test(sourceSnippet);
+  }
+
+  if (candidate.fieldKey === 'manufacturerAddress') {
+    return /\baddress\s*[:：\-–—]/i.test(sourceSnippet);
+  }
+
+  return true;
+}
+
 function findFieldValue(text, rule) {
   const labels = rule.labels || [];
   const allLabels = extractionFieldRules.flatMap((item) => item.labels || []);
@@ -867,22 +1156,28 @@ function findFieldValue(text, rule) {
 }
 
 const extractionFieldRules = [
-  { sectionId: 'basics', fieldKey: 'productName', label: '产品名称', confidence: 0.88, labels: ['Product Name', 'Device Name', 'Trade Name', 'Commercial Name', 'Name of Device', '产品名称', '器械名称'] },
+  {
+    sectionId: 'basics',
+    fieldKey: 'productName',
+    label: '产品名称',
+    confidence: 0.88,
+    labels: ['Product Name', 'Device Name', 'Trade Name', 'Commercial Name', 'Name of Device', '产品名称', '器械名称'],
+    fallback: (_text, lines) => findManualProductTitle(lines)
+  },
   {
     sectionId: 'basics',
     fieldKey: 'genericName',
     label: '通用名/器械类型',
     confidence: 0.78,
     labels: ['Generic Name', 'Device Generic Name', 'Common Name', 'Device Description', 'Product Description', '通用名', '器械通用名称'],
-    fallback: (text) => cleanExtractedValue(text.match(/\bis\s+(?:a|an)\s+([^.\n]{8,160}?(?:system|device|software|monitor|sensor|app|application|platform))/i)?.[1] || '')
+    fallback: (_text, lines) => findManualProductTitle(lines)
   },
   {
     sectionId: 'basics',
     fieldKey: 'deviceClass',
     label: '器械类别',
     confidence: 0.82,
-    labels: ['Device Class', 'Risk Class', 'MDR Classification', 'Medical Device Class', 'Classification', 'Classification under MDR', '器械类别', '管理类别'],
-    fallback: (text) => cleanExtractedValue(text.match(/\bClass\s+(I{1,3}[ab]?|A|B|C|D)\b/i)?.[0] || '')
+    labels: ['Device Class', 'Risk Class', 'MDR Classification', 'Medical Device Class', 'Classification under MDR', '器械类别', '管理类别']
   },
   {
     sectionId: 'basics',
@@ -899,8 +1194,15 @@ const extractionFieldRules = [
   { sectionId: 'scope', fieldKey: 'useEnvironment', label: '使用环境', confidence: 0.76, labels: ['Use Environment', 'Environment of Use', 'Use Setting', 'Clinical Setting', 'Use Location', '使用环境', '使用场景'] },
   { sectionId: 'scope', fieldKey: 'operatingPrinciple', label: '工作原理', confidence: 0.8, labels: ['Operating Principle', 'Principle of Operation', 'Mode of Action', 'Working Principle', 'Technology Principle', '工作原理', '作用机理'] },
   { sectionId: 'market', fieldKey: 'clinicalStudySummary', label: '临床研究摘要', confidence: 0.78, labels: ['Clinical Study Summary', 'Clinical Evidence Summary', '临床研究摘要', '临床证据摘要'] },
-  { sectionId: 'company', fieldKey: 'manufacturer', label: '制造商', confidence: 0.86, labels: ['Manufacturer', 'Legal Manufacturer', 'Manufacturer Name', '制造商', '注册人'] },
-  { sectionId: 'company', fieldKey: 'manufacturerAddress', label: '制造商地址', confidence: 0.78, labels: ['Manufacturer Address', 'Registered Address', '制造商地址', '注册地址'] }
+  { sectionId: 'company', fieldKey: 'manufacturer', label: '制造商', confidence: 0.86, labels: ['Legal Manufacturer', 'Manufacturer Name', 'Manufacture', 'Manufacturer', '制造商', '注册人'] },
+  {
+    sectionId: 'company',
+    fieldKey: 'manufacturerAddress',
+    label: '制造商地址',
+    confidence: 0.78,
+    labels: ['Manufacturer Address', 'Registered Address', '制造商地址', '注册地址'],
+    fallback: (_text, lines) => findManufacturerAddress(lines)
+  }
 ];
 
 function mapProfileCandidates(text) {
@@ -908,15 +1210,16 @@ function mapProfileCandidates(text) {
   for (const rule of extractionFieldRules) {
     const value = findFieldValue(text, rule);
     if (!value) continue;
-    candidates.push({
+    const candidate = {
       sectionId: rule.sectionId,
       fieldKey: rule.fieldKey,
       label: rule.label,
       value,
       confidence: rule.confidence,
       source: 'rules',
-      sourceSnippet: snippetAround(text, value)
-    });
+      sourceSnippet: authoritativeSnippetAround(text, value, rule.fieldKey)
+    };
+    if (candidateHasAuthoritativeEvidence(candidate, text)) candidates.push(candidate);
   }
   return candidates;
 }
@@ -1336,8 +1639,13 @@ app.post('/api/profile-extractions/preview', upload.single('file'), async (req, 
 });
 
 app.get('/api/projects', async (req, res) => {
-  const db = await readDb();
-  res.json(db.projects);
+  const db = await purgeExpiredSafely(new Date());
+  res.json(listActiveProjects(db));
+});
+
+app.get('/api/projects/deleted', async (req, res) => {
+  const db = await purgeExpiredSafely(new Date());
+  res.json(listDeletedProjects(db));
 });
 
 app.post('/api/projects', async (req, res) => {
@@ -1362,10 +1670,9 @@ app.post('/api/projects', async (req, res) => {
 
 app.post('/api/projects/from-profile', async (req, res) => {
   const profileInput = req.body.profile || req.body;
-  const missing = missingProfileFields(profileInput);
-  if (missing.length) {
-    return res.status(400).json({ error: 'Missing required profile fields', missing });
-  }
+  const selectedRegion = profileInput.basics?.regulation;
+  const validation = validateMarketProfile(selectedRegion, profileInput);
+  if (validation.code) return res.status(400).json(validation);
 
   const db = await readDb();
   const id = `project-${Date.now()}`;
@@ -1383,16 +1690,59 @@ app.post('/api/projects/from-profile', async (req, res) => {
   };
   db.projects.unshift(project);
   db.deviceProfiles.push(profile);
-  const task = initializeClinicalEvaluationWorkflow(db, id);
+  const templateId = profileFor(selectedRegion, profileInput).taskTemplateId;
+  const task = templateId === 'hong-kong-document-revision'
+    ? initializeHongKongDocumentRevisionTask(db, id)
+    : templateId === 'clinical-evaluation'
+      ? initializeClinicalEvaluationWorkflow(db, id)
+      : createTaskFromTemplate(db, id, templateId);
   event(db, 'project.created_from_profile', `从设备画像创建项目：${project.title}`, { projectId: id });
   await writeDb(db);
   res.status(201).json({ project, profile, tasks: [task] });
 });
 
+app.delete('/api/projects/:projectId', async (req, res) => {
+  const db = await readDb();
+  try {
+    const result = softDeleteProject(db, req.params.projectId, new Date());
+    event(result.db, 'project.deleted', `项目移入回收区：${result.project.title}`, { projectId: result.project.id });
+    await writeDb(result.db);
+    res.json({ project: result.project, fileCount: result.fileCount, deletedAt: result.project.deletedAt, purgeAt: result.project.purgeAt });
+  } catch (error) {
+    res.status(lifecycleErrorStatus(error)).json({ error: error.message });
+  }
+});
+
+app.post('/api/projects/:projectId/restore', async (req, res) => {
+  const db = await readDb();
+  try {
+    const result = restoreProject(db, req.params.projectId);
+    event(result.db, 'project.restored', `恢复项目：${result.project.title}`, { projectId: result.project.id });
+    await writeDb(result.db);
+    res.json({ project: result.project, fileCount: result.fileCount, deletedAt: null, purgeAt: null });
+  } catch (error) {
+    res.status(lifecycleErrorStatus(error)).json({ error: error.message });
+  }
+});
+
+app.delete('/api/projects/:projectId/permanent', async (req, res) => {
+  const db = await readDb();
+  try {
+    const result = await purgeProjectTwoPhase(db, req.params.projectId, {
+      now: new Date(), readDb, writeDb, deleteUploads: removeStoredUploads,
+      cleanupProjectStorage: hongKongRegistrationStore.cleanupProjectStorage
+    });
+    res.json({ project: result.project, fileCount: result.fileCount, deletedAt: result.project.deletedAt, purgeAt: result.project.purgeAt });
+  } catch (error) {
+    const status = error.message.startsWith('Project not found') ? 404 : 409;
+    res.status(status).json({ error: error.message });
+  }
+});
+
 app.get('/api/projects/:projectId', async (req, res) => {
   const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
+  if (!project) return;
   res.json({
     project,
     profile: db.deviceProfiles.find((item) => item.projectId === project.id) || null,
@@ -1411,8 +1761,8 @@ app.get('/api/task-templates', (req, res) => {
 
 app.post('/api/projects/:projectId/tasks', async (req, res) => {
   const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
+  if (!project) return;
   const templateId = req.body.templateId || 'clinical-evaluation';
   const task = createTaskFromTemplate(db, project.id, templateId);
   if (!task) return res.status(400).json({ error: 'Unsupported task template' });
@@ -1427,51 +1777,64 @@ app.post('/api/projects/:projectId/tasks', async (req, res) => {
 
 app.put('/api/projects/:projectId/profile', async (req, res) => {
   const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
+  if (!project) return;
   const existing = db.deviceProfiles.find((item) => item.projectId === project.id);
+  const saveMode = req.body.save_mode || 'final';
+  if (!['draft', 'final'].includes(saveMode)) return res.status(400).json({ error: 'Unsupported profile save mode' });
+  const profileInput = req.body.profile || req.body;
+  if (saveMode === 'draft' && !profileInput.basics?.regulation) {
+    return res.status(400).json({ code: 'market_profile_validation_failed', missing: ['basics.regulation'], incompatible: [] });
+  }
+  const selectedRegion = profileInput.basics?.regulation || existing?.basics?.regulation || project.market;
+  const normalizedInput = normalizeMarketProfile({ ...profileInput, basics: { ...(profileInput.basics || {}), regulation: selectedRegion } });
+  const validation = validateMarketProfile(selectedRegion, normalizedInput, { saveMode });
+  if (validation.code) return res.status(400).json(validation);
   const profile = {
     projectId: project.id,
-    ...req.body,
+    ...normalizedInput,
     updatedAt: new Date().toISOString()
   };
   if (existing) {
-    Object.assign(existing, profile);
+    db.deviceProfiles[db.deviceProfiles.indexOf(existing)] = profile;
   } else {
     db.deviceProfiles.push(profile);
   }
-  project.product = profile.basics?.productName || project.product;
-  project.market = profile.basics?.regulation || project.market;
-  project.deviceClass = profile.basics?.deviceClass || project.deviceClass;
-  project.manufacturer = profile.company?.manufacturer || project.manufacturer;
-  event(db, 'profile.saved', `保存设备画像：${project.product}`, { projectId: project.id });
+  Object.assign(project, profileProjectFields(profile));
+  event(db, 'profile.saved', `保存设备画像：${project.product}`, { projectId: project.id, saveMode });
   await writeDb(db);
-  res.json(existing || profile);
+  res.json(profile);
 });
 
-app.post('/api/projects/:projectId/files', upload.single('file'), async (req, res) => {
-  const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+app.post('/api/projects/:projectId/files', requireActiveProjectRequest, upload.single('file'), async (req, res) => {
   const file = {
     id: `file-${Date.now()}`,
-    projectId: project.id,
+    projectId: req.params.projectId,
     name: req.file?.originalname || req.body.name || 'Uploaded file',
     type: req.body.type || 'Context',
     note: req.body.note || '用户上传的项目上下文文件',
     storedName: req.file?.filename || null,
     uploadedAt: new Date().toISOString()
   };
-  db.files.push(file);
-  event(db, 'file.uploaded', `上传文件：${file.name}`, { projectId: project.id, fileId: file.id });
-  await writeDb(db);
-  res.status(201).json(file);
+  try {
+    await withDbMutation(() => finalizeProjectUpload({
+        projectId: req.params.projectId,
+        file,
+        readDb,
+        writeDb,
+        deleteUploads: removeStoredUploads,
+        beforeWrite: (db) => event(db, 'file.uploaded', `上传文件：${file.name}`, { projectId: req.params.projectId, fileId: file.id })
+      }));
+    res.status(201).json(file);
+  } catch (error) {
+    res.status(lifecycleErrorStatus(error)).json({ error: error.message });
+  }
 });
 
 app.post('/api/projects/:projectId/files/:fileId/extract-profile', async (req, res) => {
   const db = await readDb();
-  const project = db.projects.find((item) => item.id === req.params.projectId);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const project = findActiveProjectOrRespond(db, req.params.projectId, res);
+  if (!project) return;
   const file = db.files.find((item) => item.projectId === project.id && item.id === req.params.fileId);
   if (!file) return res.status(404).json({ error: 'File not found' });
 
@@ -1518,6 +1881,7 @@ app.post('/api/projects/:projectId/files/:fileId/extract-profile', async (req, r
 
 app.post('/api/projects/:projectId/steps/:stepId/generate', async (req, res) => {
   const db = await readDb();
+  if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
   const step = db.steps.find((item) => item.projectId === req.params.projectId && item.id === req.params.stepId);
   if (!step) return res.status(404).json({ error: 'Step not found' });
   const output = await buildStepOutput(db, req.params.projectId, step);
@@ -1532,6 +1896,7 @@ app.post('/api/projects/:projectId/steps/:stepId/generate', async (req, res) => 
 
 app.put('/api/projects/:projectId/steps/:stepId/output/fields/:sectionId/:fieldKey', async (req, res) => {
   const db = await readDb();
+  if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
   const step = db.steps.find((item) => item.projectId === req.params.projectId && item.id === req.params.stepId);
   if (!step) return res.status(404).json({ error: 'Step not found' });
   if (!step.output?.structuredFields) return res.status(400).json({ error: 'Step output has not been generated' });
@@ -1556,6 +1921,7 @@ app.put('/api/projects/:projectId/steps/:stepId/output/fields/:sectionId/:fieldK
 
 app.post('/api/projects/:projectId/steps/:stepId/approve', async (req, res) => {
   const db = await readDb();
+  if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
   const step = db.steps.find((item) => item.projectId === req.params.projectId && item.id === req.params.stepId);
   if (!step) return res.status(404).json({ error: 'Step not found' });
   step.status = 'approved';
@@ -1572,6 +1938,7 @@ app.post('/api/projects/:projectId/steps/:stepId/approve', async (req, res) => {
 
 app.post('/api/projects/:projectId/documents/:documentId/action', async (req, res) => {
   const db = await readDb();
+  if (!findActiveProjectOrRespond(db, req.params.projectId, res)) return;
   const doc = db.documents.find((item) => item.projectId === req.params.projectId && item.id === req.params.documentId);
   if (!doc) return res.status(404).json({ error: 'Document not found' });
   const regulatoryKnowledgeContext = await resolveRegulatoryKnowledgeContext(db, req.params.projectId, doc.name);

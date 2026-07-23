@@ -1,0 +1,26 @@
+.project-nav-children { display: grid; gap: 4px; margin: 2px 0 8px 34px; }
+.project-nav-children button { border: 0; border-radius: 8px; padding: 8px 10px; color: #aab7ca; background: transparent; text-align: left; cursor: pointer; }
+.project-nav-children button:hover, .project-nav-children button.active { color: #fff; background: rgba(255,255,255,.1); }
+.project-management { min-height: 520px; }
+.project-detail-layout > .left-panel { display: none; }
+.project-detail-layout > .task-workspace { width: 100%; }
+.project-filters { display: flex; gap: 12px; margin: 18px 0; }
+.project-filters label { flex: 1; display: flex; align-items: center; gap: 8px; border: 1px solid #dbe2ea; border-radius: 10px; padding: 0 12px; }
+.project-filters input { width: 100%; border: 0; padding: 11px 0; outline: none; background: transparent; }
+.project-filters select { border: 1px solid #dbe2ea; border-radius: 10px; padding: 0 12px; background: #fff; }
+.management-list { display: grid; gap: 10px; }
+.management-list article { display: flex; justify-content: space-between; gap: 18px; align-items: center; border: 1px solid #e3e8ef; border-radius: 12px; padding: 16px; }
+.management-list article.selected { border-color: #7aa7e8; background: #f5f9ff; }
+.project-summary { display: grid; flex: 1; gap: 5px; min-width: 0; }
+.project-selection { display: grid; place-items: center; flex: 0 0 auto; cursor: pointer; }
+.project-selection input { width: 18px; height: 18px; margin: 0; accent-color: #2361c4; cursor: pointer; }
+.project-management-actions { display: flex; align-items: center; gap: 10px; }
+.management-list article span, .management-list article small, .empty-projects { color: #667085; }
+.danger-btn { display: inline-flex; align-items: center; border: 1px solid #dc2626; border-radius: 9px; padding: 9px 13px; color: #b91c1c; background: #fff; cursor: pointer; }
+.danger-btn:disabled { cursor: not-allowed; opacity: .45; }
+@media (max-width: 760px) {
+  .project-filters, .management-list article { align-items: stretch; flex-direction: column; }
+  .project-management .panel-head { align-items: stretch; }
+  .project-management-actions { flex-wrap: wrap; }
+  .project-selection { align-self: flex-start; }
+}
