@@ -9,8 +9,11 @@ import {
   canVisitStep,
   stepValidationMessage,
   savePlanForStepAction,
+  createEmptyProfileFromSections,
   initializeNewProjectProfile,
+  regulatoryRegionForWizardLayout,
   readStoredProfileDraft,
+  shouldCheckIncompatibleRegulatoryFields,
   writeStoredProfileDraft
 } from '../src/features/device-profile/profile-navigation.js';
 
@@ -135,6 +138,46 @@ test('new project initialization discards the previous create-mode draft', () =>
 
   assert.equal(initializeNewProjectProfile(storage, 'reguverse-profile-draft-create', emptyProfile), emptyProfile);
   assert.equal(stored['reguverse-profile-draft-create'], undefined);
+});
+
+test('new project fields stay empty even when select fields define options', () => {
+  const profile = createEmptyProfileFromSections([
+    {
+      id: 'basics',
+      fields: [
+        ['regulation', '法规区域', true, 'select', ['EU MDR', 'NMPA']],
+        ['deviceClass', '器械类别', true, 'select', ['Class I', 'Class II']],
+        ['classificationRule', '分类规则', true, 'select', ['Rule 1', 'Rule 2']]
+      ]
+    },
+    {
+      id: 'confirmations',
+      fields: [['status', '状态', true, 'select', ['draft', 'approved']]]
+    }
+  ]);
+
+  assert.deepEqual(profile, {
+    projectId: null,
+    basics: {
+      regulation: '',
+      deviceClass: '',
+      classificationRule: ''
+    },
+    confirmations: {
+      status: 'draft'
+    }
+  });
+});
+
+test('an unselected regulatory region uses the EU wizard layout without selecting EU MDR', () => {
+  assert.equal(regulatoryRegionForWizardLayout(''), 'EU MDR');
+  assert.equal(regulatoryRegionForWizardLayout('香港注册（MDACS）'), '香港注册（MDACS）');
+});
+
+test('market conflict checks run only when both regulatory regions are selected', () => {
+  assert.equal(shouldCheckIncompatibleRegulatoryFields('', 'EU MDR'), false);
+  assert.equal(shouldCheckIncompatibleRegulatoryFields('香港注册（MDACS）', ''), false);
+  assert.equal(shouldCheckIncompatibleRegulatoryFields('EU MDR', '香港注册（MDACS）'), true);
 });
 
 test('step save plans never create a project while advancing', () => {

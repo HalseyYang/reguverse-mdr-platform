@@ -43,7 +43,7 @@ import {
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
 import { HongKongRegistrationTask } from './features/hong-kong-registration/HongKongRegistrationTask.jsx';
 import { profileFor, incompatiblePopulatedFieldsWithAliases, clearIncompatibleMarketFields, normalizeMarketProfile, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway, wizardSectionsFor } from './features/device-profile/market-profile-configurations.js';
-import { canVisitStep, initializeNewProjectProfile, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, savePlanForStepAction, stepValidationMessage, writeStoredProfileDraft } from './features/device-profile/profile-navigation.js';
+import { canVisitStep, createEmptyProfileFromSections, initializeNewProjectProfile, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, regulatoryRegionForWizardLayout, savePlanForStepAction, shouldCheckIncompatibleRegulatoryFields, stepValidationMessage, writeStoredProfileDraft } from './features/device-profile/profile-navigation.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity }
@@ -281,13 +281,7 @@ const profileSections = [
 ];
 
 function createEmptyDeviceProfile() {
-  return profileSections.reduce((profile, section) => ({
-    ...profile,
-    [section.id]: section.fields.reduce((values, [key, , , , options]) => ({
-      ...values,
-      [key]: key === 'status' ? 'draft' : options?.[0] || ''
-    }), {})
-  }), { projectId: null });
+  return createEmptyProfileFromSections(profileSections);
 }
 
 function getMissingProfileFields(profile) {
@@ -876,8 +870,10 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     setCandidateEdits({});
   }, [extraction?.id]);
 
-  const regulatoryFieldConfiguration = fieldConfigurationForRegulatoryRegion(draft.basics?.regulation);
-  const selectedMarketProfile = profileFor(draft.basics?.regulation, draft);
+  const selectedRegulatoryRegion = draft.basics?.regulation || '';
+  const wizardLayoutRegion = regulatoryRegionForWizardLayout(selectedRegulatoryRegion);
+  const regulatoryFieldConfiguration = fieldConfigurationForRegulatoryRegion(wizardLayoutRegion);
+  const selectedMarketProfile = profileFor(wizardLayoutRegion, draft);
   const legacyResolvedProfileSections = profileSections.map((profileSection) => {
     if (profileSection.id !== 'basics') return profileSection;
     return {
@@ -897,13 +893,13 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       })
     };
   });
-  const resolvedProfileSections = draft.basics?.regulation === 'EU MDR'
+  const resolvedProfileSections = wizardLayoutRegion === 'EU MDR'
     ? legacyResolvedProfileSections.map((legacySection, index) => ({
       ...legacySection,
       id: selectedMarketProfile.steps[index]?.id || legacySection.id,
       dataSectionId: legacySection.id
     }))
-    : wizardSectionsFor(draft.basics?.regulation, draft).map((step) => ({
+    : wizardSectionsFor(wizardLayoutRegion, draft).map((step) => ({
       id: step.id,
       title: step.title,
       dataSectionId: step.dataSectionId,
@@ -913,7 +909,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
         .map((marketField) => [marketField.name, marketField.label, marketField.required, marketField.type === 'select' ? 'select' : 'input', marketField.options, marketField.sectionId])
     }));
   const section = resolvedProfileSections.find((item) => item.id === activeSection) || resolvedProfileSections[0];
-  const missing = (draft.basics?.regulation === 'EU MDR' ? getMissingProfileFields(draft) : resolvedProfileSections.flatMap((profileSection) => profileSection.fields
+  const missing = (wizardLayoutRegion === 'EU MDR' ? getMissingProfileFields(draft) : resolvedProfileSections.flatMap((profileSection) => profileSection.fields
     .filter(([key, , required, , , fieldSectionId]) => required && !String(draft[fieldSectionId || profileSection.dataSectionId || profileSection.id]?.[key] || '').trim())
     .map(([key, label, , , , fieldSectionId]) => ({ sectionId: fieldSectionId || profileSection.dataSectionId || profileSection.id, key, label, text: `${profileSection.title} / ${label}` }))));
   const recommendedHongKongClass = draft.basics?.regulation === HONG_KONG_REGULATORY_REGION
@@ -936,7 +932,9 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   const updateField = (sectionId, key, value) => {
     setNavigationValidationMessage('');
     if (sectionId === 'basics' && key === 'regulation') {
-      const incompatible = incompatiblePopulatedFieldsWithAliases(draft.basics?.regulation, value, draft);
+      const incompatible = shouldCheckIncompatibleRegulatoryFields(selectedRegulatoryRegion, value)
+        ? incompatiblePopulatedFieldsWithAliases(selectedRegulatoryRegion, value, draft)
+        : [];
       if (incompatible.length) {
         setPendingRegionChange({ value, incompatible });
         return;
@@ -949,9 +947,8 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
         nextSection.hong_kong_classification_override_reason = '';
       }
       if (sectionId === 'basics' && key === 'regulation') {
-        const configuration = fieldConfigurationForRegulatoryRegion(value);
         nextSection.classificationRule = '';
-        nextSection.deviceClass = configuration.deviceClasses[0] || '';
+        nextSection.deviceClass = '';
         nextSection.classificationMismatchReason = '';
       }
       if (sectionId === 'basics' && key === 'classificationRule' && current.basics?.regulation === HONG_KONG_REGULATORY_REGION) {

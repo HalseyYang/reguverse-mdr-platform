@@ -2,6 +2,24 @@ function stepIndex(steps, stepId) {
   return steps.findIndex((step) => step.id === stepId);
 }
 
+export function createEmptyProfileFromSections(sections) {
+  return sections.reduce((profile, section) => ({
+    ...profile,
+    [section.id]: section.fields.reduce((values, [key]) => ({
+      ...values,
+      [key]: key === 'status' ? 'draft' : ''
+    }), {})
+  }), { projectId: null });
+}
+
+export function regulatoryRegionForWizardLayout(selectedRegulatoryRegion) {
+  return selectedRegulatoryRegion || 'EU MDR';
+}
+
+export function shouldCheckIncompatibleRegulatoryFields(currentRegulatoryRegion, nextRegulatoryRegion) {
+  return Boolean(currentRegulatoryRegion && nextRegulatoryRegion);
+}
+
 export function previousStep(steps, activeStep) {
   const index = stepIndex(steps, activeStep);
   return index > 0 ? steps[index - 1].id : null;
