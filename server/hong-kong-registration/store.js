@@ -25,11 +25,55 @@ function safelyResolve(root, ...segments) {
 }
 
 function extension(name) { return path.extname(name || '').toLowerCase(); }
+function zipCentralDirectoryEntryNames(buffer) {
+  const minimumEndOffset = Math.max(0, buffer.length - 65_557);
+  let endOffset = -1;
+  for (let offset = buffer.length - 22; offset >= minimumEndOffset; offset -= 1) {
+    if (buffer.readUInt32LE(offset) === 0x06054b50) { endOffset = offset; break; }
+  }
+  if (endOffset < 0) return null;
+  const entryCount = buffer.readUInt16LE(endOffset + 10);
+  const centralDirectoryLength = buffer.readUInt32LE(endOffset + 12);
+  const centralDirectoryOffset = buffer.readUInt32LE(endOffset + 16);
+  const centralDirectoryEnd = centralDirectoryOffset + centralDirectoryLength;
+  if (centralDirectoryEnd > endOffset || centralDirectoryEnd > buffer.length) return null;
+  const names = new Set();
+  let offset = centralDirectoryOffset;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (offset + 46 > centralDirectoryEnd || buffer.readUInt32LE(offset) !== 0x02014b50) return null;
+    const flags = buffer.readUInt16LE(offset + 8);
+    if (flags & 0x0001) throw storageError('encrypted_file');
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const localHeaderOffset = buffer.readUInt32LE(offset + 42);
+    const nextOffset = offset + 46 + nameLength + extraLength + commentLength;
+    if (nextOffset > centralDirectoryEnd) return null;
+    const entryName = buffer.subarray(offset + 46, offset + 46 + nameLength).toString('utf8').replaceAll('\\', '/');
+    if (localHeaderOffset + 30 > centralDirectoryOffset || buffer.readUInt32LE(localHeaderOffset) !== 0x04034b50) return null;
+    const localFlags = buffer.readUInt16LE(localHeaderOffset + 6);
+    if (localFlags & 0x0001) throw storageError('encrypted_file');
+    const localCompressedLength = buffer.readUInt32LE(localHeaderOffset + 18);
+    const localNameLength = buffer.readUInt16LE(localHeaderOffset + 26);
+    const localExtraLength = buffer.readUInt16LE(localHeaderOffset + 28);
+    const localDataOffset = localHeaderOffset + 30 + localNameLength + localExtraLength;
+    if (localDataOffset + localCompressedLength > centralDirectoryOffset) return null;
+    const localName = buffer.subarray(localHeaderOffset + 30, localHeaderOffset + 30 + localNameLength).toString('utf8').replaceAll('\\', '/');
+    if (localName !== entryName) return null;
+    names.add(entryName);
+    offset = nextOffset;
+  }
+  return offset === centralDirectoryEnd ? names : null;
+}
+
 function validSignature(ext, buffer) {
   if (ext === '.pdf') return buffer.subarray(0, 5).toString() === '%PDF-';
   if (ext === '.png') return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
   if (['.jpg', '.jpeg'].includes(ext)) return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
-  if (ext === '.docx') return buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && [0x03, 0x05, 0x07].includes(buffer[2]) && [0x04, 0x06, 0x08].includes(buffer[3]);
+  if (ext === '.docx') {
+    const entries = zipCentralDirectoryEntryNames(buffer);
+    return Boolean(entries?.has('[Content_Types].xml') && entries.has('word/document.xml'));
+  }
   return false;
 }
 
@@ -128,8 +172,14 @@ export function createHongKongRegistrationStore({ dataRoot = path.resolve('data'
       if (!task) throw storageError('hong_kong_task_not_found');
       const file = task.files.find((item) => item.fileId === fileId);
       if (!file) throw storageError('file_not_found');
-      for (const directory of ['sources', 'extracted', 'drafts', 'finals']) {
-        for (const storedName of [file.storedName, ...(file[`${directory}StoredNames`] || [])].filter(Boolean)) {
+      const controlledNames = {
+        sources: [file.storedName].filter(Boolean),
+        extracted: file.extractedStoredNames || [],
+        drafts: file.draftsStoredNames || [],
+        finals: file.finalsStoredNames || []
+      };
+      for (const [directory, storedNames] of Object.entries(controlledNames)) {
+        for (const storedName of storedNames) {
           if (path.basename(storedName) !== storedName) throw storageError('invalid_storage_record');
           await rm(safelyResolve(projectDirectory(projectId), directory, storedName), { force: true });
         }

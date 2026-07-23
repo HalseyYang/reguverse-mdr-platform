@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -16,6 +16,49 @@ import {
 import { createHongKongRegistrationStore } from '../server/hong-kong-registration/store.js';
 import { createHongKongRegistrationRouter } from '../server/hong-kong-registration/routes.js';
 import { purgeProjectTwoPhase } from '../server/project-lifecycle.js';
+
+function zipWithEntries(entryNames) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const entryName of entryNames) {
+    const name = Buffer.from(entryName);
+    const data = Buffer.from('<xml/>');
+    let checksum = 0xffffffff;
+    for (const byte of data) {
+      checksum ^= byte;
+      for (let bit = 0; bit < 8; bit += 1) checksum = (checksum >>> 1) ^ (0xedb88320 & -(checksum & 1));
+    }
+    checksum = (checksum ^ 0xffffffff) >>> 0;
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    localParts.push(local, name, data);
+    centralParts.push(central, name);
+    offset += local.length + name.length + data.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entryNames.length, 8);
+  end.writeUInt16LE(entryNames.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, centralDirectory, end]);
+}
 
 test('contract exposes the exact six phases and eight statuses', () => {
   assert.deepEqual(HONG_KONG_DOCUMENT_REVISION_PHASES.map(({ label }) => label), [
@@ -114,6 +157,56 @@ test('batch source upload is all-or-nothing and validates content signatures', a
     assert.deepEqual(await readdir(join(root, 'hong_kong_registration', 'project-alpha', 'sources')), []);
     await assert.rejects(() => store.addSourceFiles('project-alpha', [{ originalName: 'fake.pdf', buffer: Buffer.from('not pdf') }]),
       (error) => error.code === 'content_signature_mismatch');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('DOCX validation reads central-directory entries and rejects renamed XLSX and generic ZIP files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hk-store-docx-'));
+  try {
+    const store = createHongKongRegistrationStore({ dataRoot: root });
+    await store.createTask('project-alpha');
+    const docx = zipWithEntries(['[Content_Types].xml', 'word/document.xml']);
+    assert.equal((await store.addSourceFiles('project-alpha', [{ originalName: 'valid.docx', buffer: docx }])).files.length, 1);
+    const renamedXlsx = zipWithEntries(['[Content_Types].xml', 'xl/workbook.xml']);
+    await assert.rejects(() => store.addSourceFiles('project-alpha', [{ originalName: 'renamed.docx', buffer: renamedXlsx }]),
+      (error) => error.code === 'content_signature_mismatch');
+    const genericZip = zipWithEntries(['[Content_Types].xml', 'payload/data.xml']);
+    await assert.rejects(() => store.addSourceFiles('project-alpha', [{ originalName: 'generic.docx', buffer: genericZip }]),
+      (error) => error.code === 'content_signature_mismatch');
+    const forgedCentralDirectory = Buffer.from(docx);
+    forgedCentralDirectory.writeUInt32LE(0, 0);
+    await assert.rejects(() => store.addSourceFiles('project-alpha', [{ originalName: 'forged.docx', buffer: forgedCentralDirectory }]),
+      (error) => error.code === 'content_signature_mismatch');
+    await assert.rejects(() => store.addSourceFiles('project-alpha', [{ originalName: 'truncated.docx', buffer: docx.subarray(0, docx.length - 5) }]),
+      (error) => error.code === 'content_signature_mismatch');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('deleting a source never applies its stored name to other controlled directories', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hk-store-delete-map-'));
+  try {
+    const store = createHongKongRegistrationStore({ dataRoot: root });
+    await store.createTask('project-alpha');
+    const task = await store.addSourceFiles('project-alpha', [{ originalName: 'source.pdf', buffer: Buffer.from('%PDF-1.7\nsource') }]);
+    const source = task.files[0];
+    const projectDirectory = join(root, 'hong_kong_registration', 'project-alpha');
+    for (const directory of ['extracted', 'drafts', 'finals']) {
+      await writeFile(join(projectDirectory, directory, source.storedName), `belongs to another file in ${directory}`);
+    }
+    await store.mutateTask('project-alpha', (current) => ({
+      ...current,
+      files: [...current.files, {
+        fileId: 'hk-file-collision-owner', originalName: 'other.pdf', storedName: null,
+        extractedStoredNames: [source.storedName], draftsStoredNames: [source.storedName], finalsStoredNames: [source.storedName],
+        status: 'completed', processingMode: 'revise'
+      }]
+    }));
+    await store.deleteFile('project-alpha', source.fileId);
+    await assert.rejects(() => access(join(projectDirectory, 'sources', source.storedName)), { code: 'ENOENT' });
+    for (const directory of ['extracted', 'drafts', 'finals']) {
+      await access(join(projectDirectory, directory, source.storedName));
+    }
+    assert.deepEqual((await store.getTask('project-alpha')).files.map(({ fileId }) => fileId), ['hk-file-collision-owner']);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
