@@ -577,40 +577,96 @@ const aiCandidateMap = {
   manufacturerAddress: ['company', 'manufacturerAddress', '制造商地址']
 };
 
+const aiExtractionEvidenceHeadingPattern = /^(?:\d+(?:\.\d+)*[\s.)-]*)?(?:product name|device name|trade name|commercial name|name of device|generic name|device generic name|common name|device description|product description|device class|risk class|mdr classification|medical device class|classification under mdr|classification rule|applicable rule|classification rationale|intended use|intended purpose|purpose of use|indications?(?: for use)?|patient population|target population|intended (?:patient|user|operator)|target user|use environment|environment of use|use setting|clinical setting|principle of operation|operating principle|mode of action|working principle|clinical study summary|clinical evidence summary|legal manufacturer|manufacturer name|manufacturer(?: and contact)? information|manufacture|manufacturer address|registered address|address)\b/i;
+
+function boundedDocumentLines(lines, maximumLength) {
+  const selected = [];
+  let currentLength = 0;
+  for (const line of lines) {
+    const boundedLine = compactText(line).slice(0, 1600);
+    if (!boundedLine) continue;
+    if (currentLength + boundedLine.length + 1 > maximumLength) break;
+    selected.push(boundedLine);
+    currentLength += boundedLine.length + 1;
+  }
+  return selected.join('\n');
+}
+
+function buildAiExtractionDocumentText(text, maximumLength = 18000) {
+  const lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const compactDocument = compactText(text);
+  if (compactDocument.length <= maximumLength) return lines.join('\n');
+
+  const leadingContext = boundedDocumentLines(lines.slice(0, 24), 4000);
+  const evidenceLineIndexes = new Set();
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!aiExtractionEvidenceHeadingPattern.test(lines[index])) continue;
+    for (let nearbyIndex = Math.max(0, index - 1); nearbyIndex <= Math.min(lines.length - 1, index + 6); nearbyIndex += 1) {
+      evidenceLineIndexes.add(nearbyIndex);
+    }
+  }
+  const evidenceContext = boundedDocumentLines(
+    [...evidenceLineIndexes].sort((left, right) => left - right).map((index) => lines[index]),
+    12000
+  );
+  const endingContext = boundedDocumentLines(lines.slice(-12), 1800);
+  return [leadingContext, evidenceContext, endingContext].filter(Boolean).join('\n\n').slice(0, maximumLength);
+}
+
+function aiProfileExtractionTimeoutMilliseconds() {
+  const configured = Number.parseInt(process.env.AI_PROFILE_TIMEOUT_MS || '', 10);
+  if (Number.isFinite(configured) && configured >= 50 && configured <= 120000) return configured;
+  return 45000;
+}
+
 async function extractProfileCandidatesWithAi(text) {
   if (!aiExtractionConfigured()) return [];
   const config = aiConfig();
-  const response = await fetch(`${config.baseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: config.model,
-      temperature: 0,
-      max_tokens: 1800,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: [
-            'Extract medical device profile fields from the provided document.',
-            'Return only JSON. Example JSON: {"productName":null,"genericName":null,"deviceClass":null,"classificationRule":null,"intendedUse":null,"indications":null,"targetPopulation":null,"intendedUsers":null,"useEnvironment":null,"operatingPrinciple":null,"clinicalStudySummary":null,"manufacturer":null,"manufacturerAddress":null}.',
-            'Use null when a field is not supported by the text.',
-            'Do not invent values. Prefer exact wording from the document.'
-          ].join(' ')
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            fields: Object.keys(aiCandidateMap),
-            documentText: compactText(text).slice(0, 18000)
-          })
-        }
-      ]
-    })
-  });
+  const timeoutMilliseconds = aiProfileExtractionTimeoutMilliseconds();
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), timeoutMilliseconds);
+  let response;
+  try {
+    response = await fetch(`${config.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      signal: abortController.signal,
+      body: JSON.stringify({
+        model: config.model,
+        temperature: 0,
+        max_tokens: 1800,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'Extract medical device profile fields from the provided document.',
+              'Return only JSON. Example JSON: {"productName":null,"genericName":null,"deviceClass":null,"classificationRule":null,"intendedUse":null,"indications":null,"targetPopulation":null,"intendedUsers":null,"useEnvironment":null,"operatingPrinciple":null,"clinicalStudySummary":null,"manufacturer":null,"manufacturerAddress":null}.',
+              'Use null when a field is not supported by the text.',
+              'Do not invent values. Prefer exact wording from the document.'
+            ].join(' ')
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              fields: Object.keys(aiCandidateMap),
+              documentText: buildAiExtractionDocumentText(text)
+            })
+          }
+        ]
+      })
+    });
+  } catch (error) {
+    if (abortController.signal.aborted) {
+      throw new Error(`AI extraction timed out after ${timeoutMilliseconds} ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!response.ok) throw new Error(`AI extraction failed: ${response.status}`);
   const payload = await response.json();
   const parsed = JSON.parse(payload.choices?.[0]?.message?.content || '{}');
