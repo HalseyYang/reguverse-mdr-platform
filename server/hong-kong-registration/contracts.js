@@ -20,6 +20,7 @@ function updateFile(task, fileId, updater) {
   const files = (task.files || []).map((file) => {
     if (file.fileId !== fileId) return structuredClone(file);
     found = true;
+    if (file.status === 'deletion_pending') throw Object.assign(new Error('file_deletion_pending'), { code: 'file_deletion_pending' });
     return updater(structuredClone(file));
   });
   if (!found) throw Object.assign(new Error('file_not_found'), { code: 'file_not_found' });

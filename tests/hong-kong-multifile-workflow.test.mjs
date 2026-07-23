@@ -179,7 +179,37 @@ test('DOCX validation reads central-directory entries and rejects renamed XLSX a
       (error) => error.code === 'content_signature_mismatch');
     await assert.rejects(() => store.addSourceFiles('project-alpha', [{ originalName: 'truncated.docx', buffer: docx.subarray(0, docx.length - 5) }]),
       (error) => error.code === 'content_signature_mismatch');
+    for (const [name, unsafeDocx] of [
+      ['duplicate.docx', zipWithEntries(['[Content_Types].xml', 'word/document.xml', 'word/document.xml'])],
+      ['traversal.docx', zipWithEntries(['[Content_Types].xml', '../word/document.xml', 'word/document.xml'])],
+      ['absolute.docx', zipWithEntries(['[Content_Types].xml', '/word/document.xml', 'word/document.xml'])],
+      ['nul.docx', zipWithEntries(['[Content_Types].xml', 'evil\0.xml', 'word/document.xml'])]
+    ]) {
+      await assert.rejects(() => store.addSourceFiles('project-alpha', [{ originalName: name, buffer: unsafeDocx }]),
+        (error) => error.code === 'content_signature_mismatch');
+    }
+    const declaredBomb = Buffer.from(docx);
+    const endOffset = declaredBomb.length - 22;
+    const centralOffset = declaredBomb.readUInt32LE(endOffset + 16);
+    declaredBomb.writeUInt32LE(200 * 1024 * 1024, 22);
+    declaredBomb.writeUInt32LE(200 * 1024 * 1024, centralOffset + 24);
+    await assert.rejects(() => store.addSourceFiles('project-alpha', [{ originalName: 'bomb.docx', buffer: declaredBomb }]),
+      (error) => error.code === 'content_signature_mismatch');
+    const methodMismatch = Buffer.from(docx);
+    methodMismatch.writeUInt16LE(8, centralOffset + 10);
+    await assert.rejects(() => store.addSourceFiles('project-alpha', [{ originalName: 'method.docx', buffer: methodMismatch }]),
+      (error) => error.code === 'content_signature_mismatch');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('upload batch limits reject excessive file count and aggregate bytes without task mutation', async () => {
+  const module = await import('../server/hong-kong-registration/store.js');
+  assert.equal(module.MAXIMUM_FILE_COUNT_PER_UPLOAD, 4);
+  assert.equal(module.MAXIMUM_TOTAL_UPLOAD_BYTE_LENGTH, 100 * 1024 * 1024);
+  assert.throws(() => module.validateUploadBatch(Array.from({ length: 5 }, () => ({ buffer: Buffer.alloc(1) }))),
+    (error) => error.code === 'too_many_files' && error.maximumFileCount === 4);
+  assert.throws(() => module.validateUploadBatch(Array.from({ length: 4 }, () => ({ buffer: { length: 25 * 1024 * 1024 + 1 } }))),
+    (error) => error.code === 'upload_batch_too_large' && error.maximumTotalUploadByteLength === 100 * 1024 * 1024);
 });
 
 test('deleting a source never applies its stored name to other controlled directories', async () => {
@@ -210,13 +240,97 @@ test('deleting a source never applies its stored name to other controlled direct
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('delete outbox persists before physical deletion and retains references on deletion failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hk-store-delete-outbox-'));
+  let rejectPhysicalDeletion = true;
+  const { rm: realRemove } = await import('node:fs/promises');
+  try {
+    const store = createHongKongRegistrationStore({
+      dataRoot: root,
+      remove: async (target, options) => {
+        if (rejectPhysicalDeletion && target.includes(`${join('project-alpha', 'sources')}`)) throw new Error('simulated object deletion failure');
+        return realRemove(target, options);
+      }
+    });
+    await store.createTask('project-alpha');
+    const source = (await store.addSourceFiles('project-alpha', [{ originalName: 'source.pdf', buffer: Buffer.from('%PDF-1.7\nsource') }])).files[0];
+    await assert.rejects(() => store.deleteFile('project-alpha', source.fileId), /simulated object deletion failure/);
+    const pending = (await store.getTask('project-alpha')).files[0];
+    assert.equal(pending.status, 'deletion_pending');
+    assert.deepEqual(pending.pendingControlledStoredNames, { sources: [source.storedName], extracted: [], drafts: [], finals: [] });
+    await assert.rejects(() => store.mutateTask('project-alpha', (task) => retryFile(task, source.fileId)),
+      (error) => error.code === 'file_deletion_pending');
+    await assert.rejects(() => store.mutateTask('project-alpha', (task) => confirmDocumentType(task, source.fileId, { confirmedDocumentType: 'ifu' })),
+      (error) => error.code === 'file_deletion_pending');
+    rejectPhysicalDeletion = false;
+    await store.deleteFile('project-alpha', source.fileId);
+    assert.equal((await store.getTask('project-alpha')).files.length, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('delete outbox does not remove objects if its first atomic task write fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hk-store-delete-first-write-'));
+  const { rename: realRename } = await import('node:fs/promises');
+  let failNextRename = false;
+  try {
+    const store = createHongKongRegistrationStore({
+      dataRoot: root,
+      rename: async (from, to) => {
+        if (failNextRename && to.endsWith('task.json')) { failNextRename = false; throw new Error('first outbox write failed'); }
+        return realRename(from, to);
+      }
+    });
+    await store.createTask('project-alpha');
+    const source = (await store.addSourceFiles('project-alpha', [{ originalName: 'source.pdf', buffer: Buffer.from('%PDF-1.7\nsource') }])).files[0];
+    failNextRename = true;
+    await assert.rejects(() => store.deleteFile('project-alpha', source.fileId), /first outbox write failed/);
+    await access(join(root, 'hong_kong_registration', 'project-alpha', 'sources', source.storedName));
+    assert.equal((await store.getTask('project-alpha')).files[0].status, 'extracting_content');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('delete outbox converges after final task write failure without overwriting another file mutation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hk-store-delete-final-write-'));
+  const { rename: realRename } = await import('node:fs/promises');
+  let taskRenameCount = 0;
+  let failAtRename = Number.POSITIVE_INFINITY;
+  try {
+    const store = createHongKongRegistrationStore({
+      dataRoot: root,
+      rename: async (from, to) => {
+        if (to.endsWith('task.json')) taskRenameCount += 1;
+        if (taskRenameCount === failAtRename) throw new Error('final outbox write failed');
+        return realRename(from, to);
+      }
+    });
+    await store.createTask('project-alpha');
+    const task = await store.addSourceFiles('project-alpha', [
+      { originalName: 'one.pdf', buffer: Buffer.from('%PDF-1.7\none') },
+      { originalName: 'two.pdf', buffer: Buffer.from('%PDF-1.7\ntwo') }
+    ]);
+    const [first, second] = task.files;
+    failAtRename = taskRenameCount + 2;
+    await assert.rejects(() => store.deleteFile('project-alpha', first.fileId), /final outbox write failed/);
+    assert.equal((await store.getTask('project-alpha')).files.find(({ fileId }) => fileId === first.fileId).status, 'deletion_pending');
+    failAtRename = Number.POSITIVE_INFINITY;
+    await Promise.all([
+      store.deleteFile('project-alpha', first.fileId),
+      store.mutateTask('project-alpha', (current) => markFileFailed(current, second.fileId, { code: 'damaged_file' }))
+    ]);
+    const finalTask = await store.getTask('project-alpha');
+    assert.deepEqual(finalTask.files.map(({ fileId }) => fileId), [second.fileId]);
+    assert.equal(finalTask.files[0].status, 'processing_failed');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('project-scoped API rejects non-MDACS and deleted projects and isolates retry/delete', async () => {
   const root = await mkdtemp(join(tmpdir(), 'hk-routes-'));
   const store = createHongKongRegistrationStore({ dataRoot: root });
   const projects = new Map([
     ['hk-active', { id: 'hk-active', market: '香港注册（MDACS）' }],
     ['eu-active', { id: 'eu-active', market: 'EU MDR' }],
-    ['hk-deleted', { id: 'hk-deleted', market: '香港注册（MDACS）', deletedAt: new Date().toISOString() }]
+    ['hk-deleted', { id: 'hk-deleted', market: '香港注册（MDACS）', deletedAt: new Date().toISOString() }],
+    ['hk-empty', { id: 'hk-empty', market: '香港注册（MDACS）' }]
   ]);
   await store.createTask('hk-active');
   const app = express();
@@ -230,6 +344,15 @@ test('project-scoped API rejects non-MDACS and deleted projects and isolates ret
   try {
     assert.equal((await fetch(`${url}/eu-active/hong-kong-registration/task`)).status, 409);
     assert.equal((await fetch(`${url}/hk-deleted/hong-kong-registration/task`)).status, 409);
+    assert.equal((await fetch(`${url}/hk-empty/hong-kong-registration/task`)).status, 404);
+    await assert.rejects(() => access(join(root, 'hong_kong_registration', 'hk-empty')), { code: 'ENOENT' });
+
+    const excessiveForm = new FormData();
+    for (let index = 0; index < 5; index += 1) excessiveForm.append('files', new Blob([Buffer.from('%PDF-1.7')]), `${index}.pdf`);
+    const excessiveResponse = await fetch(`${url}/hk-active/hong-kong-registration/files`, { method: 'POST', body: excessiveForm });
+    assert.equal(excessiveResponse.status, 413);
+    assert.deepEqual(await excessiveResponse.json(), { code: 'too_many_files', maximumFileCount: 4 });
+    assert.equal((await store.getTask('hk-active')).files.length, 0);
 
     const form = new FormData();
     form.append('files', new Blob([Buffer.from('%PDF-1.7\none')], { type: 'application/pdf' }), 'one.pdf');
@@ -257,6 +380,23 @@ test('project-scoped API rejects non-MDACS and deleted projects and isolates ret
     await new Promise((resolve) => server.close(resolve));
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('project storage cleanup serializes with creation and prevents directory resurrection', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'hk-store-purge-race-'));
+  try {
+    const store = createHongKongRegistrationStore({ dataRoot: root });
+    await store.createTask('project-alpha');
+    const cleanup = store.cleanupProjectStorage('project-alpha');
+    const concurrentRead = store.getTask('project-alpha');
+    const recreate = store.createTask('project-alpha');
+    const [, readResult, recreateResult] = await Promise.allSettled([cleanup, concurrentRead, recreate]);
+    assert.deepEqual(readResult, { status: 'fulfilled', value: null });
+    assert.equal(recreateResult.status, 'rejected');
+    assert.equal(recreateResult.reason.code, 'project_storage_deleted');
+    assert.equal(await store.getTask('project-alpha'), null);
+    await assert.rejects(() => access(join(root, 'hong_kong_registration', 'project-alpha')), { code: 'ENOENT' });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('two-phase project purge cleans Hong Kong project storage before database removal', async () => {
