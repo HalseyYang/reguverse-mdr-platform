@@ -70,7 +70,8 @@ export function confirmDocumentType(task, fileId, input) {
     recommendedDocumentType: input.recommendedDocumentType || null,
     confirmedDocumentType: input.confirmedDocumentType,
     templateIdentifier: input.templateIdentifier ?? null,
-    gn02Item: input.gn02Item ?? null,
+    gn02ItemCode: input.gn02ItemCode ?? input.gn02Item ?? null,
+    reasoningSummary: input.reasoningSummary ?? file.reasoningSummary ?? null,
     processingMode: processingModeFor(input),
     status: 'revising_sections',
     updatedAt: new Date().toISOString()

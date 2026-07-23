@@ -42,6 +42,7 @@ import {
   regulatoryRegionOptions
 } from './features/hong-kong-registration/regulatory-options.js';
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
+import { HongKongRegistrationTask } from './features/hong-kong-registration/HongKongRegistrationTask.jsx';
 import { profileFor, incompatiblePopulatedFieldsWithAliases, clearIncompatibleMarketFields, normalizeMarketProfile, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway, wizardSectionsFor } from './features/device-profile/market-profile-configurations.js';
 import { canVisitStep, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, readStoredProfileDraft, savePlanForStepAction, writeStoredProfileDraft } from './features/device-profile/profile-navigation.js';
 
@@ -716,6 +717,10 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
 
   if (!creatingProfile && !selectedProject) {
     return <section className="panel empty-projects"><h2>暂无有效项目</h2><p>请选择项目或创建新项目。</p><button className="primary-btn" onClick={startProfileCreate}><Plus size={16} />新建项目</button></section>;
+  }
+
+  if (!creatingProfile && selectedProject?.market === HONG_KONG_REGULATORY_REGION) {
+    return <section className="panel task-workspace"><HongKongRegistrationTask project={selectedProject} api={api} notify={notify} /></section>;
   }
 
   return (

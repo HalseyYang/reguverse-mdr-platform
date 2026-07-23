@@ -1,6 +1,11 @@
 import express from 'express';
 import multer from 'multer';
+import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { confirmDocumentType, retryFile } from './contracts.js';
+import {
+  applyBrowserOcrPages, extractSourceContent, recommendDocumentType
+} from './extraction.js';
 import {
   MAXIMUM_BYTE_LENGTH, MAXIMUM_FILE_COUNT_PER_UPLOAD, MAXIMUM_TOTAL_UPLOAD_BYTE_LENGTH, validateUploadBatch
 } from './store.js';
@@ -72,6 +77,62 @@ export function createHongKongRegistrationRouter({ store, requireProjectAccess }
     try {
       const task = await store.mutateTask(req.params.projectId, (current) => retryFile(current, req.params.fileId));
       res.json({ file: publicFile(task.files.find((file) => file.fileId === req.params.fileId)) });
+    } catch (error) { next(error); }
+  });
+
+  router.post('/files/:fileId/extract', async (req, res, next) => {
+    try {
+      const current = await store.getTask(req.params.projectId);
+      const source = current?.files.find((file) => file.fileId === req.params.fileId);
+      if (!source) return res.status(404).json({ code: 'file_not_found' });
+      if (!source.storedName || path.basename(source.storedName) !== source.storedName) {
+        return res.status(422).json({ code: 'damaged_file' });
+      }
+      const sourcePath = path.resolve(store.root, req.params.projectId, 'sources', source.storedName);
+      const result = await extractSourceContent({
+        fileName: source.originalName,
+        buffer: await readFile(sourcePath)
+      });
+      const recommendation = recommendDocumentType({
+        fileName: source.originalName,
+        textPreview: result.extraction.textPreview
+      });
+      const task = await store.mutateTask(req.params.projectId, (taskDraft) => ({
+        ...taskDraft,
+        files: taskDraft.files.map((file) => file.fileId === req.params.fileId
+          ? { ...file, ...result, ...recommendation, updatedAt: new Date().toISOString() }
+          : file),
+        updatedAt: new Date().toISOString()
+      }));
+      res.json({ file: publicFile(task.files.find((file) => file.fileId === req.params.fileId)) });
+    } catch (error) {
+      if (['damaged_file', 'encrypted_file'].includes(error.code)) {
+        try {
+          await store.mutateTask(req.params.projectId, (taskDraft) => ({
+            ...taskDraft,
+            files: taskDraft.files.map((file) => file.fileId === req.params.fileId
+              ? { ...file, status: 'processing_failed', failure: { code: error.code }, updatedAt: new Date().toISOString() }
+              : file),
+            updatedAt: new Date().toISOString()
+          }));
+        } catch {}
+      }
+      next(error);
+    }
+  });
+
+  router.post('/files/:fileId/browser-ocr-pages', async (req, res, next) => {
+    try {
+      const task = await store.mutateTask(req.params.projectId, (taskDraft) => ({
+        ...taskDraft,
+        files: taskDraft.files.map((file) => file.fileId === req.params.fileId
+          ? applyBrowserOcrPages(file, req.body || {})
+          : file),
+        updatedAt: new Date().toISOString()
+      }));
+      const file = task.files.find((item) => item.fileId === req.params.fileId);
+      if (!file) return res.status(404).json({ code: 'file_not_found' });
+      res.json({ file: publicFile(file) });
     } catch (error) { next(error); }
   });
 
