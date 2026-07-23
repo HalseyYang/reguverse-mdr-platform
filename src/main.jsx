@@ -720,7 +720,15 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
   }
 
   if (!creatingProfile && selectedProject?.market === HONG_KONG_REGULATORY_REGION) {
-    return <section className="panel task-workspace"><HongKongRegistrationTask project={selectedProject} api={api} notify={notify} /></section>;
+    const hasHongKongBusinessTask = detail?.tasks?.some((task) =>
+      task.title === '香港注册文件修订'
+      || task.templateId === 'hong-kong-document-revision'
+      || task.templateIdentifier === 'hong-kong-document-revision'
+    );
+    if (hasHongKongBusinessTask) {
+      return <section className="panel task-workspace"><HongKongRegistrationTask project={selectedProject} api={api} notify={notify} /></section>;
+    }
+    return <section className="panel empty-projects"><h2>香港注册文件修订任务未初始化</h2><p>当前项目尚未包含“香港注册文件修订”业务任务，请先在项目画像中完成香港任务创建。</p></section>;
   }
 
   return (

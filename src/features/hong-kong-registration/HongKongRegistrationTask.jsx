@@ -21,15 +21,21 @@ const errorMessages = {
   content_signature_mismatch: '文件内容与扩展名不一致。',
   damaged_file: '文件已损坏或无法读取。',
   encrypted_file: '文件已加密，请解密后重试。',
-  project_market_not_mdacs: '当前项目不是香港 MDACS 项目。'
+  project_market_not_mdacs: '当前项目不是香港 MDACS 项目。',
+  new_template_requires_user_approval: '需要先批准/建立 Bioray 模板，当前不能进入正式修订。',
+  invalid_template_identifier: '请选择系统登记的香港模板。',
+  hong_kong_task_storage_not_found: '文件修订工作区尚未初始化。'
 };
+const templateOptions = ['MDS-01', 'MDS-02', 'risk_management_report', 'clinical_evaluation_report', 'essential_principles_checklist'];
 
 async function requestJson(api, path, options) {
   try { return await api(path, options); }
   catch (error) {
     let code = '';
     try { code = JSON.parse(error.message)?.code || ''; } catch {}
-    throw new Error(errorMessages[code] || '操作失败，请稍后重试。');
+    const friendly = new Error(errorMessages[code] || '操作失败，请稍后重试。');
+    friendly.code = code;
+    throw friendly;
   }
 }
 
@@ -40,14 +46,36 @@ export function HongKongRegistrationTask({ project, api, notify }) {
   const [busyIds, setBusyIds] = useState(new Set());
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [message, setMessage] = useState('');
+  const [initializationRequired, setInitializationRequired] = useState(false);
   const base = `/projects/${project.id}/hong-kong-registration`;
 
   const load = async () => {
     setLoading(true);
-    try { setTask(await requestJson(api, `${base}/task`)); }
-    catch (error) { setTask({ projectId: project.id, status: 'awaiting_upload', files: [] }); setMessage(error.message); }
+    try {
+      setTask(await requestJson(api, `${base}/task`));
+      setInitializationRequired(false);
+    } catch (error) {
+      setTask(null);
+      setInitializationRequired(error.code === 'hong_kong_task_storage_not_found');
+      setMessage(error.message);
+    }
     finally { setLoading(false); }
   };
+
+  const initializeWorkspace = async () => {
+    setLoading(true);
+    try {
+      setTask(await requestJson(api, `${base}/task`, { method: 'POST' }));
+      setInitializationRequired(false);
+      setMessage('文件修订工作区已初始化。');
+    } catch (error) { setMessage(error.message); }
+    finally { setLoading(false); }
+  };
+
+  const editFile = (fileId, field, value) => setTask((current) => ({
+    ...current,
+    files: current.files.map((file) => file.fileId === fileId ? { ...file, [field]: value } : file)
+  }));
   useEffect(() => { load(); }, [project.id]);
 
   const withBusy = async (fileId, operation) => {
@@ -129,6 +157,7 @@ export function HongKongRegistrationTask({ project, api, notify }) {
       {message && <p role="status">{message}</p>}
     </section>
     {loading ? <div className="hk-empty"><LoaderCircle className="spin" />正在加载香港任务…</div>
+      : initializationRequired ? <div className="hk-empty"><FileCheck2 size={28} /><strong>文件修订工作区尚未初始化</strong><span>业务任务已存在，可创建其独立文件存储。</span><button className="primary-btn" onClick={initializeWorkspace}>初始化文件修订工作区</button></div>
       : !files.length ? <div className="hk-empty"><FileCheck2 size={28} /><strong>工作区已就绪</strong><span>上传第一批注册资料即可开始识别。</span></div>
         : <div className="hk-file-grid">{files.map((file) => {
           const busy = busyIds.has(file.fileId);
@@ -137,9 +166,9 @@ export function HongKongRegistrationTask({ project, api, notify }) {
           return <article className={`hk-file-card ${file.status === 'processing_failed' ? 'failed' : ''}`} key={file.fileId}>
             <div className="hk-file-title"><div><strong>{file.originalName}</strong><span>{statusLabels[file.status] || file.status}</span></div><span className="hk-mode">{file.processingMode || 'revise'}</span></div>
             <dl>
-              <div><dt>文件类型</dt><dd>{file.confirmedDocumentType || file.recommendedDocumentType || '识别中'}</dd></div>
-              <div><dt>GN02 项目</dt><dd>{file.gn02ItemCode || '待确认'}</dd></div>
-              <div><dt>模板</dt><dd>{file.templateIdentifier || '无需/待确认'}</dd></div>
+              <div><dt>文件类型</dt><dd>{file.status === 'awaiting_document_type_confirmation' ? <input value={file.confirmedDocumentType || file.recommendedDocumentType || ''} onChange={(event) => editFile(file.fileId, 'confirmedDocumentType', event.target.value)} /> : file.confirmedDocumentType || file.recommendedDocumentType || '识别中'}</dd></div>
+              <div><dt>GN02 项目</dt><dd>{file.status === 'awaiting_document_type_confirmation' ? <input value={file.gn02ItemCode || ''} onChange={(event) => editFile(file.fileId, 'gn02ItemCode', event.target.value)} /> : file.gn02ItemCode || '待确认'}</dd></div>
+              <div><dt>模板</dt><dd>{file.status === 'awaiting_document_type_confirmation' ? <select value={file.templateIdentifier || ''} onChange={(event) => editFile(file.fileId, 'templateIdentifier', event.target.value || null)}><option value="">无模板（仅审查文件）</option>{templateOptions.map((identifier) => <option key={identifier} value={identifier}>{identifier}</option>)}</select> : file.templateIdentifier || '无需/待确认'}</dd></div>
               <div><dt>待确认数</dt><dd>{file.pendingConfirmationCount || 0}</dd></div>
               <div><dt>最新版本</dt><dd>{file.latestVersion?.label || '尚未生成'}</dd></div>
             </dl>

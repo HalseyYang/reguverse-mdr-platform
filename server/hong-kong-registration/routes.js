@@ -4,8 +4,9 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { confirmDocumentType, retryFile } from './contracts.js';
 import {
-  applyBrowserOcrPages, extractSourceContent, recommendDocumentType
+  applyBrowserOcrPages, classifyProcessingMode, extractSourceContent, recommendDocumentType
 } from './extraction.js';
+import { classifyTemplateRequirement } from './templates.js';
 import {
   MAXIMUM_BYTE_LENGTH, MAXIMUM_FILE_COUNT_PER_UPLOAD, MAXIMUM_TOTAL_UPLOAD_BYTE_LENGTH, validateUploadBatch
 } from './store.js';
@@ -25,6 +26,7 @@ function statusFor(error) {
   if (error.code === 'file_too_large' || error.code === 'LIMIT_FILE_SIZE') return 413;
   if (['too_many_files', 'upload_batch_too_large', 'LIMIT_FILE_COUNT', 'LIMIT_PART_COUNT'].includes(error.code)) return 413;
   if (error.code?.startsWith('invalid_') || error.code === 'confirmed_document_type_required') return 400;
+  if (['new_template_requires_user_approval', 'ocr_page_count_conflict'].includes(error.code)) return 409;
   return 500;
 }
 
@@ -53,6 +55,14 @@ export function createHongKongRegistrationRouter({ store, requireProjectAccess }
       const task = await store.getTask(req.params.projectId);
       if (!task) return res.status(404).json({ code: 'hong_kong_task_storage_not_found' });
       res.json(publicTask(task));
+    } catch (error) { next(error); }
+  });
+
+  router.post('/task', async (req, res, next) => {
+    try {
+      const existing = await store.getTask(req.params.projectId);
+      if (existing) return res.status(200).json(publicTask(existing));
+      res.status(201).json(publicTask(await store.createTask(req.params.projectId)));
     } catch (error) { next(error); }
   });
 
@@ -138,7 +148,20 @@ export function createHongKongRegistrationRouter({ store, requireProjectAccess }
 
   router.post('/files/:fileId/confirm-type', async (req, res, next) => {
     try {
-      const task = await store.mutateTask(req.params.projectId, (current) => confirmDocumentType(current, req.params.fileId, req.body || {}));
+      const input = req.body || {};
+      const processingMode = classifyProcessingMode({
+        documentType: input.confirmedDocumentType,
+        translationRequested: Boolean(input.translationRequested)
+      });
+      const template = classifyTemplateRequirement({
+        documentType: input.confirmedDocumentType,
+        templateIdentifier: input.templateIdentifier ?? null,
+        modifiable: processingMode !== 'review_only'
+      });
+      const task = await store.mutateTask(req.params.projectId, (current) => confirmDocumentType(current, req.params.fileId, {
+        ...input,
+        templateIdentifier: template.templateIdentifier
+      }));
       res.json({ file: publicFile(task.files.find((file) => file.fileId === req.params.fileId)) });
     } catch (error) { next(error); }
   });

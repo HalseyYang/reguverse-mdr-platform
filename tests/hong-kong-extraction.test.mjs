@@ -11,7 +11,8 @@ import {
 import {
   HONG_KONG_TEMPLATE_REGISTRY,
   recommendTemplate,
-  checkTemplateSourceAvailability
+  checkTemplateSourceAvailability,
+  classifyTemplateRequirement
 } from '../server/hong-kong-registration/templates.js';
 
 test('selectExtractor accepts supported document and image extensions', () => {
@@ -133,6 +134,44 @@ test('browser OCR page callbacks accumulate page progress and advance only when 
   assert.match(complete.extraction.textPreview, /First page/);
 });
 
+test('browser OCR ignores a client completion claim until every known page is present', () => {
+  const partial = applyBrowserOcrPages({
+    extraction: { browserOcrRequired: true, pageCount: 100, pages: [] }
+  }, { pages: [{ pageNumber: 1, text: 'Only one page' }], completed: true });
+  assert.equal(partial.status, 'extracting_content');
+  assert.equal(partial.extraction.progressPercent, 1);
+});
+
+test('browser OCR rejects out-of-range pages and conflicting duplicate page text', () => {
+  assert.throws(() => applyBrowserOcrPages({
+    extraction: { browserOcrRequired: true, pageCount: 2, pages: [] }
+  }, { pages: [{ pageNumber: 3, text: 'outside' }] }), { code: 'invalid_ocr_page' });
+  assert.throws(() => applyBrowserOcrPages({
+    extraction: { browserOcrRequired: true, pageCount: 2, pages: [{ pageNumber: 1, text: 'first' }] }
+  }, { pages: [{ pageNumber: 1, text: 'changed' }] }), { code: 'ocr_page_conflict' });
+});
+
+test('browser OCR advances only after all page numbers from one through pageCount exist', () => {
+  const complete = applyBrowserOcrPages({
+    extraction: { browserOcrRequired: true, pageCount: 3, pages: [] }
+  }, { pages: [
+    { pageNumber: 3, text: 'third' },
+    { pageNumber: 1, text: 'first' },
+    { pageNumber: 2, text: 'second' }
+  ] });
+  assert.equal(complete.status, 'awaiting_document_type_confirmation');
+  assert.equal(complete.extraction.progressPercent, 100);
+});
+
+test('browser OCR requires declaredPageCount before an unknown-length source can complete', () => {
+  const unknown = applyBrowserOcrPages({
+    extraction: { browserOcrRequired: true, pageCount: null, pages: [] }
+  }, { pages: [{ pageNumber: 1, text: 'image' }], completed: true });
+  assert.equal(unknown.status, 'extracting_content');
+  const finalized = applyBrowserOcrPages(unknown, { pages: [], declaredPageCount: 1 });
+  assert.equal(finalized.status, 'awaiting_document_type_confirmation');
+});
+
 test('file recognition recommendation includes type, GN02 item, template, and concise reasoning', () => {
   assert.deepEqual(recommendDocumentType({
     fileName: 'risk_management_report.docx',
@@ -143,4 +182,30 @@ test('file recognition recommendation includes type, GN02 item, template, and co
     templateIdentifier: 'risk_management_report',
     reasoningSummary: '文件名及内容包含风险管理/ISO 14971特征。'
   });
+});
+
+test('template confirmation accepts registry identifiers and review-only none', () => {
+  assert.deepEqual(classifyTemplateRequirement({
+    documentType: 'risk_management_report',
+    templateIdentifier: 'risk_management_report',
+    modifiable: true
+  }), { templateIdentifier: 'risk_management_report', requirement: 'approved_template' });
+  assert.deepEqual(classifyTemplateRequirement({
+    documentType: 'test_report',
+    templateIdentifier: null,
+    modifiable: false
+  }), { templateIdentifier: null, requirement: 'no_template_required' });
+});
+
+test('template confirmation rejects arbitrary identifiers and blocks unknown modifiable files', () => {
+  assert.throws(() => classifyTemplateRequirement({
+    documentType: 'custom annex',
+    templateIdentifier: '../../customer.docx',
+    modifiable: true
+  }), { code: 'invalid_template_identifier' });
+  assert.throws(() => classifyTemplateRequirement({
+    documentType: 'custom annex',
+    templateIdentifier: null,
+    modifiable: true
+  }), { code: 'new_template_requires_user_approval' });
 });

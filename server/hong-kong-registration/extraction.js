@@ -136,28 +136,44 @@ export async function extractSourceContent({
   }
 }
 
-export function applyBrowserOcrPages(file, { pages = [], completed = false } = {}) {
+export function applyBrowserOcrPages(file, { pages = [], declaredPageCount } = {}) {
+  const existingPageCount = Number(file.extraction?.pageCount) || null;
+  const requestedPageCount = declaredPageCount === undefined ? existingPageCount : Number(declaredPageCount);
+  if (requestedPageCount !== null && (!Number.isInteger(requestedPageCount) || requestedPageCount < 1)) {
+    throw Object.assign(new Error('invalid_ocr_page_count'), { code: 'invalid_ocr_page_count' });
+  }
+  if (existingPageCount && requestedPageCount !== existingPageCount) {
+    throw Object.assign(new Error('ocr_page_count_conflict'), { code: 'ocr_page_count_conflict' });
+  }
+  const pageCount = requestedPageCount;
   const byPage = new Map((file.extraction?.pages || []).map((page) => [page.pageNumber, page]));
   for (const page of pages) {
     const pageNumber = Number(page.pageNumber);
-    if (!Number.isInteger(pageNumber) || pageNumber < 1 || typeof page.text !== 'string') {
+    if (!Number.isInteger(pageNumber) || pageNumber < 1 || (pageCount && pageNumber > pageCount) || typeof page.text !== 'string') {
       throw Object.assign(new Error('invalid_ocr_page'), { code: 'invalid_ocr_page' });
+    }
+    const existing = byPage.get(pageNumber);
+    if (existing && existing.text !== page.text) {
+      throw Object.assign(new Error('ocr_page_conflict'), { code: 'ocr_page_conflict' });
     }
     byPage.set(pageNumber, { pageNumber, text: page.text });
   }
   const mergedPages = [...byPage.values()].sort((left, right) => left.pageNumber - right.pageNumber);
-  const pageCount = Number(file.extraction?.pageCount || mergedPages.length);
   const processedPageCount = mergedPages.length;
+  const allPagesPresent = Boolean(pageCount)
+    && processedPageCount === pageCount
+    && mergedPages.every(({ pageNumber }, index) => pageNumber === index + 1);
   const text = mergedPages.map(({ text: pageText }) => pageText).join('\n');
   return {
     ...file,
-    status: completed ? 'awaiting_document_type_confirmation' : 'extracting_content',
+    status: allPagesPresent ? 'awaiting_document_type_confirmation' : 'extracting_content',
     extraction: {
       ...file.extraction,
+      pageCount,
       pages: mergedPages,
       characterCount: characterCountOf(text),
       processedPageCount,
-      progressPercent: completed ? 100 : Math.round((processedPageCount / Math.max(pageCount, 1)) * 100),
+      progressPercent: pageCount ? Math.round((processedPageCount / pageCount) * 100) : 0,
       textPreview: previewOf(text)
     },
     updatedAt: new Date().toISOString()

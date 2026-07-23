@@ -31,3 +31,15 @@ export async function checkTemplateSourceAvailability(sourceExists) {
     available: Boolean(await sourceExists(sourceRelativePath))
   })));
 }
+
+export function classifyTemplateRequirement({ documentType = '', templateIdentifier = null, modifiable = false } = {}) {
+  if (templateIdentifier !== null && !HONG_KONG_TEMPLATE_REGISTRY.some(({ identifier }) => identifier === templateIdentifier)) {
+    throw Object.assign(new Error('invalid_template_identifier'), { code: 'invalid_template_identifier' });
+  }
+  if (templateIdentifier) return { templateIdentifier, requirement: 'approved_template' };
+  const recommendation = recommendTemplate({ documentType, modifiable });
+  if (recommendation.recommendation === 'new_template_requires_user_approval') {
+    throw Object.assign(new Error('new_template_requires_user_approval'), { code: 'new_template_requires_user_approval' });
+  }
+  return { templateIdentifier: null, requirement: recommendation.recommendation };
+}

@@ -346,6 +346,10 @@ test('project-scoped API rejects non-MDACS and deleted projects and isolates ret
     assert.equal((await fetch(`${url}/hk-deleted/hong-kong-registration/task`)).status, 409);
     assert.equal((await fetch(`${url}/hk-empty/hong-kong-registration/task`)).status, 404);
     await assert.rejects(() => access(join(root, 'hong_kong_registration', 'hk-empty')), { code: 'ENOENT' });
+    const initialized = await fetch(`${url}/hk-empty/hong-kong-registration/task`, { method: 'POST' });
+    assert.equal(initialized.status, 201);
+    assert.deepEqual((await initialized.json()).files, []);
+    assert.equal((await fetch(`${url}/hk-empty/hong-kong-registration/task`)).status, 200);
 
     const excessiveForm = new FormData();
     for (let index = 0; index < 5; index += 1) excessiveForm.append('files', new Blob([Buffer.from('%PDF-1.7')]), `${index}.pdf`);
@@ -364,6 +368,13 @@ test('project-scoped API rejects non-MDACS and deleted projects and isolates ret
     const [first, second] = uploaded.files;
     await store.mutateTask('hk-active', (task) => markFileFailed(task, first.fileId, { code: 'damaged_file' }));
     assert.equal((await fetch(`${url}/hk-active/hong-kong-registration/files/${first.fileId}/retry`, { method: 'POST' })).status, 200);
+    const blockedUnknown = await fetch(`${url}/hk-active/hong-kong-registration/files/${second.fileId}/confirm-type`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirmedDocumentType: 'custom_modifiable_annex', templateIdentifier: null })
+    });
+    assert.equal(blockedUnknown.status, 409);
+    assert.deepEqual(await blockedUnknown.json(), { code: 'new_template_requires_user_approval' });
+    assert.equal((await store.getTask('hk-active')).files.find(({ fileId }) => fileId === second.fileId).status, 'extracting_content');
     const confirmed = await fetch(`${url}/hk-active/hong-kong-registration/files/${second.fileId}/confirm-type`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ confirmedDocumentType: 'test_report', recommendedDocumentType: 'test_report' })

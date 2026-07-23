@@ -16,6 +16,7 @@
 .hk-mode { align-self: start; padding: 4px 8px; border-radius: 999px; color: #17685f!important; background: #e8f6f3; }
 .hk-file-card dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin: 0; }
 .hk-file-card dl div { padding: 9px; border-radius: 9px; background: #f6f8fa; }.hk-file-card dt { color: #71808b; font-size: 11px; }.hk-file-card dd { overflow-wrap: anywhere; margin: 4px 0 0; font-size: 13px; }
+.hk-file-card dd input,.hk-file-card dd select { width: 100%; box-sizing: border-box; margin-top: 2px; border: 1px solid #ccd7df; border-radius: 7px; padding: 6px; background: #fff; }
 .hk-progress { display: grid; grid-template-columns: 1fr auto; gap: 6px; font-size: 12px; }.hk-progress progress { grid-column: 1/-1; }
 .hk-reason,.hk-ocr-note,.hk-error { margin: 0; padding: 10px; border-radius: 9px; font-size: 12px; line-height: 1.5; }.hk-reason { background: #f3f6f8; }.hk-ocr-note { color: #7a5512; background: #fff7df; }.hk-error { color: #a52b2b; background: #fff0f0; }
 .hk-actions { display: flex; flex-wrap: wrap; gap: 7px; }.hk-actions button,.hk-actions a,.hk-delete-confirm button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #ccd7df; border-radius: 8px; padding: 7px 9px; color: #28404f; background: #fff; text-decoration: none; cursor: pointer; }
