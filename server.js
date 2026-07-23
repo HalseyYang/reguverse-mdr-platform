@@ -23,6 +23,11 @@ const upload = multer({ dest: uploadDir });
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
+const allowedRegulatoryKnowledgeBaseNames = new Set([
+  '医疗器械国内注册汇总知识库',
+  '医疗器械国际认证汇总知识库'
+]);
+
 const seed = {
   projects: [
     {
@@ -127,6 +132,30 @@ const seed = {
     { id: 'cep', projectId: 'eu-cer', name: 'Clinical Evaluation Plan (CEP)', status: 'draft', action: 'Generate' },
     { id: 'dcr', projectId: 'eu-cer', name: 'Data Collection Report (DCR)', status: 'ready', action: 'Download Word' },
     { id: 'gspr-doc', projectId: 'eu-cer', name: 'GSPR Compliance Checklist', status: 'draft', action: 'Generate' }
+  ],
+  regulatoryKnowledgeSources: [
+    {
+      id: 'hong-kong-mdacs-official',
+      title: 'Hong Kong MDACS official issued documents',
+      jurisdiction: '香港注册（MDACS）',
+      sourceType: 'Official source',
+      officialUrl: 'https://www.mdd.gov.hk/en/whats-new/issued-documents/index.html',
+      currentKnownDocuments: ['GN-02', 'TR-004', 'TR-005', 'TR-007', 'TR-008'],
+      verificationStatus: 'needs_check',
+      lastVerifiedAt: '',
+      notes: 'Official page should be checked before using IMA knowledge as formal regulatory basis.'
+    },
+    {
+      id: 'ima-regulatory-knowledge',
+      title: 'IMA regulatory knowledge base',
+      jurisdiction: 'Cross-market',
+      sourceType: 'Internal knowledge base',
+      officialUrl: '',
+      currentKnownDocuments: [],
+      verificationStatus: 'internal_reference',
+      lastVerifiedAt: '',
+      notes: 'Used for internal retrieval, working notes, templates, and interpretation history.'
+    }
   ],
   profileExtractions: [],
   events: []
@@ -359,19 +388,43 @@ function envLine(key, value) {
   return `${key}=${String(value).replace(/\n/g, '').trim()}`;
 }
 
+async function readEnvMap() {
+  try {
+    const content = await fs.readFile(envPath, 'utf8');
+    return Object.fromEntries(content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#') && line.includes('='))
+      .map((line) => {
+        const index = line.indexOf('=');
+        return [line.slice(0, index), line.slice(index + 1)];
+      }));
+  } catch {
+    return {};
+  }
+}
+
+async function writeEnvMap(values) {
+  const lines = Object.entries(values)
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim())
+    .map(([key, value]) => envLine(key, value))
+    .filter(Boolean);
+  await fs.writeFile(envPath, `${lines.join('\n')}\n`, { mode: 0o600 });
+}
+
 async function saveAiConfig(input = {}) {
   const provider = input.provider === 'deepseek' ? 'deepseek' : 'openai';
   const model = input.model || (provider === 'deepseek' ? 'deepseek-v4-flash' : 'gpt-4o-mini');
   const baseUrl = input.baseUrl || (provider === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com');
   const current = aiConfig();
   const apiKey = input.apiKey || current.apiKey || '';
-  const lines = [
-    envLine('AI_PROVIDER', provider),
-    envLine('AI_BASE_URL', baseUrl),
-    envLine('AI_PROFILE_MODEL', model),
-    provider === 'deepseek' ? envLine('DEEPSEEK_API_KEY', apiKey) : envLine('OPENAI_API_KEY', apiKey)
-  ].filter(Boolean);
-  await fs.writeFile(envPath, `${lines.join('\n')}\n`, { mode: 0o600 });
+  const values = await readEnvMap();
+  values.AI_PROVIDER = provider;
+  values.AI_BASE_URL = baseUrl;
+  values.AI_PROFILE_MODEL = model;
+  if (provider === 'deepseek') values.DEEPSEEK_API_KEY = apiKey;
+  if (provider === 'openai') values.OPENAI_API_KEY = apiKey;
+  await writeEnvMap(values);
   process.env.AI_PROVIDER = provider;
   process.env.AI_BASE_URL = baseUrl;
   process.env.AI_PROFILE_MODEL = model;
@@ -381,6 +434,313 @@ async function saveAiConfig(input = {}) {
     process.env.OPENAI_API_KEY = apiKey;
   }
   return publicAiConfig();
+}
+
+function imaConfig() {
+  const knowledgeBaseIds = (process.env.IMA_REGULATORY_KNOWLEDGE_BASE_IDS || process.env.IMA_REGULATORY_KNOWLEDGE_BASE_ID || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const knowledgeBaseNames = (process.env.IMA_REGULATORY_KNOWLEDGE_BASE_NAMES || process.env.IMA_REGULATORY_KNOWLEDGE_BASE_NAME || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return {
+    baseUrl: (process.env.IMA_BASE_URL || 'https://ima.qq.com').replace(/\/$/, ''),
+    clientId: process.env.IMA_OPENAPI_CLIENT_ID || '',
+    apiKey: process.env.IMA_OPENAPI_API_KEY || '',
+    knowledgeBaseId: knowledgeBaseIds[0] || '',
+    knowledgeBaseIds,
+    knowledgeBaseName: knowledgeBaseNames[0] || '',
+    knowledgeBaseNames
+  };
+}
+
+function extractImaShareId(value = '') {
+  try {
+    const parsed = new URL(value);
+    return parsed.searchParams.get('shareId') || '';
+  } catch {
+    return '';
+  }
+}
+
+function publicImaConfig() {
+  const config = imaConfig();
+  const clientIdLooksLikeUrl = /^https?:\/\//i.test(config.clientId);
+  const knowledgeBaseIdLooksLikeUrl = /^https?:\/\//i.test(config.knowledgeBaseId);
+  const configComplete = Boolean(config.clientId && config.apiKey && config.knowledgeBaseIds.length);
+  const formatValid = configComplete && !clientIdLooksLikeUrl && !knowledgeBaseIdLooksLikeUrl;
+  const lastValidatedAt = process.env.IMA_REGULATORY_KNOWLEDGE_BASE_VALIDATED_AT || '';
+  return {
+    configured: Boolean(formatValid && lastValidatedAt),
+    configComplete,
+    formatValid,
+    validated: Boolean(formatValid && lastValidatedAt),
+    lastValidatedAt: lastValidatedAt || null,
+    hasClientId: Boolean(config.clientId),
+    hasApiKey: Boolean(config.apiKey),
+    hasKnowledgeBaseId: Boolean(config.knowledgeBaseIds.length),
+    knowledgeBaseName: config.knowledgeBaseName,
+    knowledgeBaseNames: config.knowledgeBaseNames,
+    knowledgeBaseCount: config.knowledgeBaseIds.length,
+    warnings: [
+      clientIdLooksLikeUrl ? 'IMA Client ID should not be a URL.' : '',
+      knowledgeBaseIdLooksLikeUrl ? 'IMA knowledge base ID should not be a URL.' : ''
+    ].filter(Boolean),
+    baseUrl: config.baseUrl
+  };
+}
+
+async function saveImaConfig(input = {}) {
+  const current = imaConfig();
+  if (input.clientId && /^https?:\/\//i.test(input.clientId)) {
+    const error = new Error('IMA Client ID 不能填写 URL；请填写 IMA OpenAPI 后台提供的 Client ID。');
+    error.status = 400;
+    throw error;
+  }
+  if (input.knowledgeBaseId && /^https?:\/\//i.test(input.knowledgeBaseId)) {
+    const error = new Error('知识库 ID 不能填写 URL；请填写 IMA 知识库的 ID。');
+    error.status = 400;
+    throw error;
+  }
+  const values = await readEnvMap();
+  const knowledgeBaseIds = Array.isArray(input.knowledgeBaseIds)
+    ? input.knowledgeBaseIds.filter(Boolean)
+    : [input.knowledgeBaseId || current.knowledgeBaseId].filter(Boolean);
+  const knowledgeBaseNames = Array.isArray(input.knowledgeBaseNames)
+    ? input.knowledgeBaseNames.filter(Boolean)
+    : [input.knowledgeBaseName || current.knowledgeBaseName].filter(Boolean);
+  values.IMA_BASE_URL = input.baseUrl || current.baseUrl || 'https://ima.qq.com';
+  values.IMA_OPENAPI_CLIENT_ID = input.clientId || current.clientId || '';
+  values.IMA_OPENAPI_API_KEY = input.apiKey || current.apiKey || '';
+  values.IMA_REGULATORY_KNOWLEDGE_BASE_IDS = knowledgeBaseIds.join(',');
+  values.IMA_REGULATORY_KNOWLEDGE_BASE_NAMES = knowledgeBaseNames.join(',');
+  delete values.IMA_REGULATORY_KNOWLEDGE_BASE_ID;
+  delete values.IMA_REGULATORY_KNOWLEDGE_BASE_NAME;
+  delete values.IMA_REGULATORY_KNOWLEDGE_BASE_VALIDATED_AT;
+  await writeEnvMap(values);
+  process.env.IMA_BASE_URL = values.IMA_BASE_URL;
+  process.env.IMA_OPENAPI_CLIENT_ID = values.IMA_OPENAPI_CLIENT_ID;
+  process.env.IMA_OPENAPI_API_KEY = values.IMA_OPENAPI_API_KEY;
+  process.env.IMA_REGULATORY_KNOWLEDGE_BASE_IDS = values.IMA_REGULATORY_KNOWLEDGE_BASE_IDS;
+  process.env.IMA_REGULATORY_KNOWLEDGE_BASE_NAMES = values.IMA_REGULATORY_KNOWLEDGE_BASE_NAMES;
+  delete process.env.IMA_REGULATORY_KNOWLEDGE_BASE_ID;
+  delete process.env.IMA_REGULATORY_KNOWLEDGE_BASE_NAME;
+  delete process.env.IMA_REGULATORY_KNOWLEDGE_BASE_VALIDATED_AT;
+  return publicImaConfig();
+}
+
+async function markImaKnowledgeBaseValidated() {
+  const values = await readEnvMap();
+  const validatedAt = new Date().toISOString();
+  values.IMA_REGULATORY_KNOWLEDGE_BASE_VALIDATED_AT = validatedAt;
+  await writeEnvMap(values);
+  process.env.IMA_REGULATORY_KNOWLEDGE_BASE_VALIDATED_AT = validatedAt;
+}
+
+async function callImaKnowledgeApi(endpoint, body = {}) {
+  const config = imaConfig();
+  if (!config.clientId || !config.apiKey || !config.knowledgeBaseId) {
+    const error = new Error('IMA knowledge base is not configured.');
+    error.status = 400;
+    throw error;
+  }
+  const response = await fetch(`${config.baseUrl}/openapi/wiki/v1/${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'ima-openapi-clientid': config.clientId,
+      'ima-openapi-apikey': config.apiKey
+    },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.code !== 0) {
+    const error = new Error(payload.msg || `IMA request failed with status ${response.status}`);
+    error.status = response.ok ? 502 : response.status;
+    throw error;
+  }
+  return payload.data || {};
+}
+
+async function searchImaRegulatoryKnowledge(query, cursor = '') {
+  const config = imaConfig();
+  if (!config.clientId || !config.apiKey || !config.knowledgeBaseIds.length) {
+    const error = new Error('IMA knowledge base is not configured.');
+    error.status = 400;
+    throw error;
+  }
+
+  const resultSets = await Promise.all(config.knowledgeBaseIds.map(async (knowledgeBaseId, index) => {
+    const data = await callImaKnowledgeApi('search_knowledge', {
+      query,
+      cursor,
+      knowledge_base_id: knowledgeBaseId
+    });
+    return {
+      knowledgeBaseId,
+      knowledgeBaseName: config.knowledgeBaseNames[index] || knowledgeBaseId,
+      data
+    };
+  }));
+
+  const infoList = resultSets.flatMap((set) => (set.data.info_list || []).map((item) => ({
+    ...item,
+    knowledge_base_id: set.knowledgeBaseId,
+    knowledge_base_name: set.knowledgeBaseName
+  })));
+
+  return {
+    info_list: infoList,
+    is_end: resultSets.every((set) => Boolean(set.data.is_end)),
+    next_cursor: resultSets.find((set) => set.data.next_cursor)?.data.next_cursor || ''
+  };
+}
+
+async function callImaOpenApi(endpoint, body = {}) {
+  const config = imaConfig();
+  if (!config.clientId || !config.apiKey) {
+    const error = new Error('IMA OpenAPI Client ID/API Key is not configured.');
+    error.status = 400;
+    throw error;
+  }
+  const response = await fetch(`${config.baseUrl}/openapi/wiki/v1/${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'ima-openapi-clientid': config.clientId,
+      'ima-openapi-apikey': config.apiKey
+    },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.code !== 0) {
+    const error = new Error(payload.msg || `IMA request failed with status ${response.status}`);
+    error.status = response.ok ? 502 : response.status;
+    throw error;
+  }
+  return payload.data || {};
+}
+
+async function resolveImaKnowledgeBaseId(query) {
+  const normalized = compactText(query || '');
+  if (!normalized) {
+    const error = new Error('Knowledge base name or share URL is required.');
+    error.status = 400;
+    throw error;
+  }
+  const shareId = extractImaShareId(normalized);
+  const searchTerms = [
+    normalized.includes('ima.qq.com') ? '医疗器械国际认证汇总知识库' : normalized,
+    '医疗器械国际认证汇总知识库',
+    shareId
+  ].filter(Boolean);
+
+  for (const term of [...new Set(searchTerms)]) {
+    const data = await callImaOpenApi('search_knowledge_base', {
+      query: term,
+      cursor: '',
+      limit: 20
+    });
+    const matches = (data.info_list || []).map((item) => ({
+      id: item.id || item.kb_id,
+      name: item.name || item.kb_name,
+      coverUrl: item.cover_url || '',
+      description: item.description || ''
+    }));
+    const exact = matches.find((item) => item.name === normalized || item.name === '医疗器械国际认证汇总知识库');
+    const selected = exact || matches[0];
+    if (selected?.id) {
+      return {
+        id: selected.id,
+        name: selected.name,
+        matchedBy: term,
+        candidates: matches.map((item) => ({ id: item.id, name: item.name }))
+      };
+    }
+  }
+
+  const error = new Error('No matching IMA knowledge base was found. Confirm the OpenAPI account has access to it.');
+  error.status = 404;
+  throw error;
+}
+
+async function listImaKnowledgeBases() {
+  const collected = [];
+  let cursor = '';
+  for (let page = 0; page < 10; page += 1) {
+    const data = await callImaOpenApi('search_knowledge_base', {
+      query: '',
+      cursor,
+      limit: 20
+    });
+    collected.push(...(data.info_list || []).map((item) => ({
+      id: item.id || item.kb_id,
+      name: item.name || item.kb_name,
+      coverUrl: item.cover_url || '',
+      description: item.description || '',
+      roleType: item.role_type || '',
+      baseType: item.base_type || '',
+      contentCount: item.content_count || ''
+    })));
+    if (data.is_end) break;
+    cursor = data.next_cursor || '';
+    if (!cursor) break;
+  }
+  return collected.filter((item) => allowedRegulatoryKnowledgeBaseNames.has(item.name));
+}
+
+function regulatoryKnowledgeQueryForProject(db, projectId, purpose = '') {
+  const profile = db.deviceProfiles.find((item) => item.projectId === projectId);
+  const basics = profile?.basics || {};
+  return compactText([
+    basics.regulation,
+    basics.deviceClass,
+    basics.classificationRule,
+    basics.genericName,
+    basics.productName,
+    purpose
+  ].filter(Boolean).join(' ')).slice(0, 240);
+}
+
+async function resolveRegulatoryKnowledgeContext(db, projectId, purpose = '') {
+  const sources = db.regulatoryKnowledgeSources || seed.regulatoryKnowledgeSources;
+  const officialSources = sources.filter((item) => item.sourceType === 'Official source');
+  const query = regulatoryKnowledgeQueryForProject(db, projectId, purpose) || purpose || 'medical device regulation';
+  const context = {
+    mode: 'system_fallback_regulatory_knowledge',
+    query,
+    used: false,
+    configured: publicImaConfig().configured,
+    retrievalStatus: 'not_configured',
+    officialVerificationRequired: officialSources.some((item) => item.verificationStatus !== 'verified_current'),
+    officialSources: officialSources.map((item) => ({
+      title: item.title,
+      jurisdiction: item.jurisdiction,
+      verificationStatus: item.verificationStatus,
+      lastVerifiedAt: item.lastVerifiedAt || null,
+      officialUrl: item.officialUrl
+    })),
+    references: []
+  };
+
+  if (!context.configured) return context;
+
+  try {
+    const data = await searchImaRegulatoryKnowledge(query, '');
+    context.references = (data.info_list || []).slice(0, 5).map((item) => ({
+      title: item.title,
+      highlight: item.highlight_content || '',
+      sourceType: item.knowledge_base_name || 'IMA regulatory knowledge base'
+    }));
+    context.used = context.references.length > 0;
+    context.retrievalStatus = context.used ? 'retrieved' : 'no_match';
+  } catch (error) {
+    context.retrievalStatus = 'failed';
+    context.error = error.message;
+  }
+  return context;
 }
 
 const aiCandidateMap = {
@@ -631,7 +991,7 @@ function makeStructuredField(profile, extraction, sectionId, fieldKey, label, fa
   };
 }
 
-function buildIntendedUseConfirmationOutput(db, projectId) {
+function buildIntendedUseConfirmationOutput(db, projectId, regulatoryKnowledgeContext = null) {
   const profile = db.deviceProfiles.find((item) => item.projectId === projectId);
   const extraction = latestCompletedExtraction(db, projectId);
   const fields = [
@@ -658,7 +1018,8 @@ function buildIntendedUseConfirmationOutput(db, projectId) {
       profileProjectId: projectId,
       profileStatus: profile?.confirmations?.status || 'unknown',
       extractionId: extraction?.id || null,
-      extractionFileName: extraction?.fileName || null
+      extractionFileName: extraction?.fileName || null,
+      regulatoryKnowledgeContext
     },
     locked: false,
     structuredFields: fields,
@@ -720,7 +1081,7 @@ function makeInheritedField(step, sectionId, fieldKey, label) {
   };
 }
 
-function buildSotaReviewOutput(db, projectId) {
+function buildSotaReviewOutput(db, projectId, regulatoryKnowledgeContext = null) {
   const step1 = db.steps.find((item) => item.projectId === projectId && item.id === '1');
   if (step1?.status !== 'approved' || !step1.output?.locked) {
     return { error: 'Step 1 must be approved before generating Step 2', status: 409 };
@@ -741,7 +1102,8 @@ function buildSotaReviewOutput(db, projectId) {
     generatedFrom: {
       step1Status: step1.status,
       step1ApprovedAt: step1.approvedAt || null,
-      step1Locked: Boolean(step1.output.locked)
+      step1Locked: Boolean(step1.output.locked),
+      regulatoryKnowledgeContext
     },
     inheritedFields: [
       makeInheritedField(step1, 'basics', 'productName', '产品名称'),
@@ -787,11 +1149,16 @@ function buildSotaReviewOutput(db, projectId) {
   };
 }
 
-function buildStepOutput(db, projectId, step) {
-  if (step.id === '1') return buildIntendedUseConfirmationOutput(db, projectId);
-  if (step.id === '2') return buildSotaReviewOutput(db, projectId);
+async function buildStepOutput(db, projectId, step) {
+  const regulatoryKnowledgeContext = await resolveRegulatoryKnowledgeContext(db, projectId, step.title);
+  if (step.id === '1') return buildIntendedUseConfirmationOutput(db, projectId, regulatoryKnowledgeContext);
+  if (step.id === '2') return buildSotaReviewOutput(db, projectId, regulatoryKnowledgeContext);
   return {
     title: step.title,
+    generatedFrom: {
+      projectId,
+      regulatoryKnowledgeContext
+    },
     summary: `已基于项目设备画像、上下文文件和法规知识库生成 ${step.title} 的初稿。`,
     actionItems: ['核对ACTION REQUIRED标记', '确认来源文件一致性', '批准后进入下一步']
   };
@@ -812,6 +1179,117 @@ app.put('/api/ai/config', async (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
+});
+
+app.get('/api/knowledge/config', (req, res) => {
+  res.json(publicImaConfig());
+});
+
+app.put('/api/knowledge/config', async (req, res) => {
+  try {
+    const saved = await saveImaConfig(req.body || {});
+    res.json(saved);
+  } catch (error) {
+    res.status(error.status || 400).json({ error: error.message });
+  }
+});
+
+app.post('/api/knowledge/resolve-base', async (req, res) => {
+  try {
+    const resolved = await resolveImaKnowledgeBaseId(req.body?.query || req.body?.shareUrl || req.body?.name || '');
+    res.json(resolved);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+app.get('/api/knowledge/bases', async (req, res) => {
+  try {
+    const knowledgeBases = await listImaKnowledgeBases();
+    res.json({ knowledgeBases });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+app.post('/api/knowledge/config/use-allowed-bases', async (req, res) => {
+  try {
+    const knowledgeBases = await listImaKnowledgeBases();
+    const missing = [...allowedRegulatoryKnowledgeBaseNames].filter((name) => !knowledgeBases.some((item) => item.name === name));
+    if (missing.length) {
+      return res.status(404).json({ error: `Missing required IMA knowledge bases: ${missing.join(', ')}` });
+    }
+    const saved = await saveImaConfig({
+      baseUrl: req.body?.baseUrl,
+      clientId: req.body?.clientId,
+      apiKey: req.body?.apiKey,
+      knowledgeBaseIds: knowledgeBases.map((item) => item.id),
+      knowledgeBaseNames: knowledgeBases.map((item) => item.name)
+    });
+    res.json({ ...saved, knowledgeBases });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+app.post('/api/knowledge/config/resolve-and-save', async (req, res) => {
+  try {
+    const resolved = await resolveImaKnowledgeBaseId(req.body?.query || req.body?.shareUrl || req.body?.name || '');
+    const saved = await saveImaConfig({
+      baseUrl: req.body?.baseUrl,
+      clientId: req.body?.clientId,
+      apiKey: req.body?.apiKey,
+      knowledgeBaseId: resolved.id,
+      knowledgeBaseName: resolved.name
+    });
+    res.json({ ...saved, resolved });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+app.get('/api/knowledge/sources', async (req, res) => {
+  const db = await readDb();
+  res.json(db.regulatoryKnowledgeSources || seed.regulatoryKnowledgeSources);
+});
+
+app.post('/api/knowledge/search', async (req, res) => {
+  try {
+    const query = compactText(req.body?.query || '');
+    if (!query) return res.status(400).json({ error: 'Search query is required.' });
+    const data = await searchImaRegulatoryKnowledge(query, req.body?.cursor || '');
+    await markImaKnowledgeBaseValidated();
+    const results = (data.info_list || []).map((item) => ({
+      title: item.title,
+      mediaId: item.media_id,
+      parentFolderId: item.parent_folder_id,
+      knowledgeBaseName: item.knowledge_base_name || '',
+      highlight: item.highlight_content || ''
+    }));
+    res.json({
+      query,
+      results,
+      isEnd: Boolean(data.is_end),
+      nextCursor: data.next_cursor || ''
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+app.post('/api/knowledge/official-checks/:sourceId', async (req, res) => {
+  const db = await readDb();
+  const source = (db.regulatoryKnowledgeSources || []).find((item) => item.id === req.params.sourceId);
+  if (!source) return res.status(404).json({ error: 'Regulatory knowledge source not found.' });
+  source.verificationStatus = 'manual_check_required';
+  source.lastVerifiedAt = new Date().toISOString();
+  source.notes = req.body?.notes || source.notes || 'Official source should be manually checked before formal use.';
+  event(db, 'knowledge.official_check', `${source.title} marked for official source verification.`, {
+    sourceId: source.id,
+    jurisdiction: source.jurisdiction
+  });
+  await writeDb(db);
+  res.json(source);
 });
 
 app.post('/api/profile-extractions/preview', upload.single('file'), async (req, res) => {
@@ -1042,7 +1520,7 @@ app.post('/api/projects/:projectId/steps/:stepId/generate', async (req, res) => 
   const db = await readDb();
   const step = db.steps.find((item) => item.projectId === req.params.projectId && item.id === req.params.stepId);
   if (!step) return res.status(404).json({ error: 'Step not found' });
-  const output = buildStepOutput(db, req.params.projectId, step);
+  const output = await buildStepOutput(db, req.params.projectId, step);
   if (output.error) return res.status(output.status || 400).json({ error: output.error });
   step.status = 'generated';
   step.generatedAt = new Date().toISOString();
@@ -1096,9 +1574,11 @@ app.post('/api/projects/:projectId/documents/:documentId/action', async (req, re
   const db = await readDb();
   const doc = db.documents.find((item) => item.projectId === req.params.projectId && item.id === req.params.documentId);
   if (!doc) return res.status(404).json({ error: 'Document not found' });
+  const regulatoryKnowledgeContext = await resolveRegulatoryKnowledgeContext(db, req.params.projectId, doc.name);
   doc.status = req.body.action?.includes('Generate') ? 'generated' : 'actioned';
   doc.lastAction = req.body.action || doc.action;
   doc.updatedAt = new Date().toISOString();
+  doc.regulatoryKnowledgeContext = regulatoryKnowledgeContext;
   event(db, 'document.action', `${doc.name}: ${doc.lastAction}`, { projectId: req.params.projectId, documentId: doc.id });
   await writeDb(db);
   res.json(doc);
@@ -1230,9 +1710,12 @@ app.post('/api/classifiers/eu-mdr', (req, res) => {
 app.post('/api/ai/draft', async (req, res) => {
   const db = await readDb();
   const prompt = req.body.prompt || '';
+  const projectId = req.body.projectId || db.projects[0]?.id || 'eu-cer';
+  const regulatoryKnowledgeContext = await resolveRegulatoryKnowledgeContext(db, projectId, prompt);
   const result = {
     id: `draft-${Date.now()}`,
     title: 'AI Draft',
+    regulatoryKnowledgeContext,
     summary: `根据提示生成了任务草案：${prompt.slice(0, 80)}`,
     sections: [
       '法规依据和输入资料确认',
