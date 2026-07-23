@@ -21,5 +21,14 @@
 .hk-reason,.hk-ocr-note,.hk-error { margin: 0; padding: 10px; border-radius: 9px; font-size: 12px; line-height: 1.5; }.hk-reason { background: #f3f6f8; }.hk-ocr-note { color: #7a5512; background: #fff7df; }.hk-error { color: #a52b2b; background: #fff0f0; }
 .hk-actions { display: flex; flex-wrap: wrap; gap: 7px; }.hk-actions button,.hk-actions a,.hk-delete-confirm button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #ccd7df; border-radius: 8px; padding: 7px 9px; color: #28404f; background: #fff; text-decoration: none; cursor: pointer; }
 .hk-actions button:disabled { cursor: not-allowed; opacity: .45; }.hk-delete-confirm { display: flex; align-items: center; gap: 8px; padding: 10px; border-radius: 9px; background: #fff1f1; font-size: 12px; }
+.hk-actions .revision-btn { border-color: #0d7c70; color: #fff; background: #0d7c70; }
+.hk-actions .latest-download { border-color: #1769aa; color: #fff; background: #1769aa; }
+.hk-pending-count { color: #a45500; font-weight: 700; }
+.hk-history { display: grid; gap: 7px; padding: 11px; border: 1px solid #dce5ea; border-radius: 10px; background: #f9fbfc; }
+.hk-history > strong { font-size: 13px; }
+.hk-history > div { display: grid; grid-template-columns: minmax(110px,1fr) minmax(120px,auto) auto; align-items: center; gap: 8px; padding: 8px; border-radius: 8px; font-size: 12px; }
+.hk-history > div.latest { border: 1px solid #96d5ca; color: #0d665d; background: #eaf8f5; font-weight: 700; }
+.hk-history small { color: #71808b; font-weight: 400; }
+.hk-history a { display: inline-flex; align-items: center; gap: 4px; color: #1769aa; text-decoration: none; }
 .spin { animation: hk-spin 1s linear infinite; }@keyframes hk-spin { to { transform: rotate(360deg); } }
-@media(max-width:950px){.hk-phases{grid-template-columns:repeat(3,1fr)}.hk-file-grid{grid-template-columns:1fr}}@media(max-width:620px){.hk-hero{flex-direction:column}.hk-overall{width:100%}.hk-phases{grid-template-columns:1fr 1fr}.hk-file-card dl{grid-template-columns:1fr}}
+@media(max-width:950px){.hk-phases{grid-template-columns:repeat(3,1fr)}.hk-file-grid{grid-template-columns:1fr}}@media(max-width:620px){.hk-hero{flex-direction:column}.hk-overall{width:100%}.hk-phases{grid-template-columns:1fr 1fr}.hk-file-card dl{grid-template-columns:1fr}.hk-history>div{grid-template-columns:1fr auto}.hk-history small{grid-column:1/-1}}
