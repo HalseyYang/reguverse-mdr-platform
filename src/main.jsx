@@ -483,7 +483,7 @@ function App() {
           {notice && <Notice message={`${apiStatus === 'connected' ? 'API已连接' : apiStatus === 'offline' ? 'API离线' : 'API连接中'} · ${notice}`} onClose={() => setNotice('')} />}
           {active === 'dashboard' && <Dashboard projects={projectList} selectedProject={selectedProject} setSelectedProject={setSelectedProject} go={go} notify={notify} refreshProjects={refreshProjects} startProfileCreate={startProfileCreate} />}
           {active === 'project-management' && <ProjectManagement api={api} projects={projectList} onRefresh={refreshProjects} notify={notify} onEnter={(project) => { setCreatingProfile(false); setSelectedProject(project); setActive('projects'); }} />}
-          {active === 'project-create' && <Projects projects={projectList} selectedProject={selectedProject} setSelectedProject={setSelectedProject} selectedStep={selectedStep} setSelectedStep={setSelectedStep} notify={notify} detail={projectDetail} refreshDetail={refreshDetail} refreshProjects={refreshProjects} creatingProfile={true} setCreatingProfile={setCreatingProfile} startProfileCreate={startProfileCreate} />}
+          {active === 'project-create' && <Projects projects={projectList} selectedProject={selectedProject} setSelectedProject={setSelectedProject} selectedStep={selectedStep} setSelectedStep={setSelectedStep} notify={notify} detail={projectDetail} refreshDetail={refreshDetail} refreshProjects={refreshProjects} creatingProfile={true} setCreatingProfile={setCreatingProfile} startProfileCreate={startProfileCreate} onProjectCreated={() => setActive('projects')} />}
           {active === 'projects' && <Projects projects={projectList} selectedProject={selectedProject} setSelectedProject={setSelectedProject} selectedStep={selectedStep} setSelectedStep={setSelectedStep} notify={notify} detail={projectDetail} refreshDetail={refreshDetail} refreshProjects={refreshProjects} creatingProfile={creatingProfile} setCreatingProfile={setCreatingProfile} startProfileCreate={startProfileCreate} />}
           {active === 'documents' && <Documents notify={notify} selectedProject={selectedProject} detail={projectDetail} refreshDetail={refreshDetail} />}
           {active === 'knowledge' && <Knowledge />}
@@ -532,7 +532,7 @@ function Dashboard({ projects, selectedProject, setSelectedProject, go, notify, 
   );
 }
 
-function Projects({ projects, selectedProject, setSelectedProject, selectedStep, setSelectedStep, notify, detail, refreshDetail, refreshProjects, creatingProfile, setCreatingProfile, startProfileCreate }) {
+function Projects({ projects, selectedProject, setSelectedProject, selectedStep, setSelectedStep, notify, detail, refreshDetail, refreshProjects, creatingProfile, setCreatingProfile, startProfileCreate, onProjectCreated }) {
   const fileInput = useRef(null);
   const createFileInput = useRef(null);
   const blankProfile = useMemo(() => createEmptyDeviceProfile(), [creatingProfile]);
@@ -668,6 +668,7 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
     setCreatingProfile(false);
     setSelectedProject(project);
     await refreshDetail(project.id);
+    onProjectCreated?.(project);
   };
 
   const deleteProject = async () => {

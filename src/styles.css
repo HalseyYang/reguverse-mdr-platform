@@ -884,6 +884,16 @@ h2 {
   backdrop-filter: blur(8px);
 }
 
+.profile-navigation-footer .secondary-btn,
+.profile-navigation-footer .primary-btn {
+  width: 120px;
+  justify-content: center;
+}
+
+.profile-navigation-footer > .secondary-btn {
+  justify-self: start;
+}
+
 .profile-save-state {
   display: flex;
   align-items: center;
