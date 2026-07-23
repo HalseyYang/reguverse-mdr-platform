@@ -10,7 +10,17 @@
 .project-filters select { border: 1px solid #dbe2ea; border-radius: 10px; padding: 0 12px; background: #fff; }
 .management-list { display: grid; gap: 10px; }
 .management-list article { display: flex; justify-content: space-between; gap: 18px; align-items: center; border: 1px solid #e3e8ef; border-radius: 12px; padding: 16px; }
-.management-list article > div:first-child { display: grid; gap: 5px; }
+.management-list article.selected { border-color: #7aa7e8; background: #f5f9ff; }
+.project-summary { display: grid; flex: 1; gap: 5px; min-width: 0; }
+.project-selection { display: grid; place-items: center; flex: 0 0 auto; cursor: pointer; }
+.project-selection input { width: 18px; height: 18px; margin: 0; accent-color: #2361c4; cursor: pointer; }
+.project-management-actions { display: flex; align-items: center; gap: 10px; }
 .management-list article span, .management-list article small, .empty-projects { color: #667085; }
 .danger-btn { display: inline-flex; align-items: center; border: 1px solid #dc2626; border-radius: 9px; padding: 9px 13px; color: #b91c1c; background: #fff; cursor: pointer; }
-@media (max-width: 760px) { .project-filters, .management-list article { align-items: stretch; flex-direction: column; } }
+.danger-btn:disabled { cursor: not-allowed; opacity: .45; }
+@media (max-width: 760px) {
+  .project-filters, .management-list article { align-items: stretch; flex-direction: column; }
+  .project-management .panel-head { align-items: stretch; }
+  .project-management-actions { flex-wrap: wrap; }
+  .project-selection { align-self: flex-start; }
+}
