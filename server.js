@@ -13,10 +13,13 @@ import {
   softDeleteProject
 } from './server/project-lifecycle.js';
 import { validateMarketProfile } from './server/market-profile-validation.js';
+import { createHongKongRegistrationRouter } from './server/hong-kong-registration/routes.js';
+import { createHongKongRegistrationStore } from './server/hong-kong-registration/store.js';
 import { normalizeMarketProfile, profileFor } from './src/features/device-profile/market-profile-configurations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, 'data');
+const hongKongRegistrationStore = createHongKongRegistrationStore({ dataRoot: dataDir });
 const uploadDir = path.join(dataDir, 'uploads');
 const dbPath = path.join(dataDir, 'db.json');
 const envPath = path.join(__dirname, '.env');
@@ -286,13 +289,28 @@ async function requireActiveProjectRequest(req, res, next) {
   }
 }
 
+app.use('/api/projects/:projectId/hong-kong-registration', createHongKongRegistrationRouter({
+  store: hongKongRegistrationStore,
+  requireProjectAccess: async (projectId) => {
+    const db = await readDb();
+    const project = db.projects.find((item) => item.id === projectId);
+    return {
+      project,
+      hasHongKongTask: db.tasks.some((task) => task.projectId === projectId && task.title === '香港注册文件修订')
+    };
+  }
+}));
+
 async function purgeExpiredSafely(now) {
   return withDbMutation(async () => {
     let next = await readDb();
     const expiredIds = next.projects.filter((project) => project.deletedAt && new Date(project.purgeAt || project.deletedAt) <= now).map((project) => project.id);
     for (const id of expiredIds) {
       try {
-        const purged = await purgeProjectTwoPhase(next, id, { now, readDb, writeDb, deleteUploads: removeStoredUploads });
+        const purged = await purgeProjectTwoPhase(next, id, {
+          now, readDb, writeDb, deleteUploads: removeStoredUploads,
+          cleanupProjectStorage: hongKongRegistrationStore.cleanupProjectStorage
+        });
         next = purged.db;
       } catch (error) {
         console.error(`Expired project cleanup failed for ${id}: ${error.message}`);
@@ -1076,7 +1094,10 @@ app.post('/api/projects/:projectId/restore', async (req, res) => {
 app.delete('/api/projects/:projectId/permanent', async (req, res) => {
   const db = await readDb();
   try {
-    const result = await purgeProjectTwoPhase(db, req.params.projectId, { now: new Date(), readDb, writeDb, deleteUploads: removeStoredUploads });
+    const result = await purgeProjectTwoPhase(db, req.params.projectId, {
+      now: new Date(), readDb, writeDb, deleteUploads: removeStoredUploads,
+      cleanupProjectStorage: hongKongRegistrationStore.cleanupProjectStorage
+    });
     res.json({ project: result.project, fileCount: result.fileCount, deletedAt: result.project.deletedAt, purgeAt: result.project.purgeAt });
   } catch (error) {
     const status = error.message.startsWith('Project not found') ? 404 : 409;
