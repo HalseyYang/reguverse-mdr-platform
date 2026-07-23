@@ -378,7 +378,7 @@ function App() {
   const [selectedStep, setSelectedStep] = useState(clinicalSteps[1]);
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [prompt, setPrompt] = useState('请基于当前项目生成 CER 第2步全文评价的证据缺口与行动项。');
-  const [notice, setNotice] = useState('已加载网页版 Reguverse 原型。左侧导航、项目、步骤、文档和工具按钮均可交互。');
+  const [notice, setNotice] = useState('已加载丽和康医疗器械注册管理平台。项目、步骤和文件处理功能均可交互。');
 
   const notify = (message) => setNotice(message);
 
@@ -430,10 +430,10 @@ function App() {
     <div className="web-app">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-logo"><Bot size={22} /></div>
-          <div>
-            <strong>Reguverse OS</strong>
-            <span>Medical device regulatory platform</span>
+          <div className="brand-logo"><img src="/assets/beauty-health-logo.jpg" alt="" /></div>
+          <div className="brand-copy">
+            <strong>丽和康医疗器械<br />注册管理平台</strong>
+            <span>Beauty Health Medical Device Registration Platform</span>
           </div>
         </div>
         <nav className="nav">
@@ -454,8 +454,8 @@ function App() {
         <div className="tenant-card">
           <Building2 size={18} />
           <div>
-            <strong>Acme MedTech</strong>
-            <span>Enterprise workspace</span>
+            <strong>丽和康</strong>
+            <span>企业工作区</span>
           </div>
         </div>
       </aside>
@@ -540,7 +540,7 @@ function Dashboard({ projects, selectedProject, setSelectedProject, go, notify, 
         <button className="secondary-btn full" onClick={() => go('projects', `已进入 ${selectedProject.product} 的任务工作台。`)}>进入任务工作台 <ChevronRight size={16} /></button>
       </section>
       <section className="panel">
-        <span className="eyebrow">Reguverse extraction</span>
+        <span className="eyebrow">智能文件识别</span>
         <h2>真实产品域</h2>
         <div className="mini-list">
           {['projects', 'clinical-eval', 'pms', 'nmpa', 'classifier', 'knowledge', 'qms', 'tplc', 'translation', 'organizations'].map((item) => (
