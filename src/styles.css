@@ -1045,20 +1045,6 @@ h2 {
   font-size: 12px;
 }
 
-.create-mode-note {
-  margin-top: 12px;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 10px 12px;
-  border: 1px solid #bbf7d0;
-  border-radius: 8px;
-  color: #14532d;
-  background: #f0fdf4;
-  font-size: 13px;
-  line-height: 1.45;
-}
-
 .task-type {
   padding: 13px;
   border-radius: 8px;

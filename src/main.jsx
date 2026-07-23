@@ -25,7 +25,6 @@ import {
   Plus,
   Search,
   Settings,
-  ShieldCheck,
   Sparkles,
   SquarePen,
   Trash2,
@@ -765,12 +764,6 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
           onCancel={() => setCreatingProfile(false)}
           extraction={activeExtraction}
         />
-        {creatingProfile && (
-          <div className="create-mode-note">
-            <ShieldCheck size={18} />
-            <span>创建模式下不会使用 Kranus Mictera 默认值；只有保存后才会生成项目记录。</span>
-          </div>
-        )}
         {!creatingProfile && (
           <>
         <div className="context-grid">
