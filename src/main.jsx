@@ -500,7 +500,7 @@ function Dashboard({ projects, selectedProject, setSelectedProject, go, notify, 
   if (!selectedProject) return <section className="panel empty-projects"><h2>暂无有效项目</h2><p>已删除项目不会显示在工作区。你可以新建项目继续。</p><button className="primary-btn" onClick={startProfileCreate}><Plus size={16} />新建项目</button></section>;
   return (
     <div className="dashboard-grid">
-      <section className="panel span-2">
+      <section className="panel span-3">
         <div className="panel-head">
           <div>
             <span className="eyebrow">Active dossiers</span>
@@ -527,36 +527,6 @@ function Dashboard({ projects, selectedProject, setSelectedProject, go, notify, 
             </button>
           ))}
         </div>
-      </section>
-      <section className="panel">
-        <span className="eyebrow">Current project</span>
-        <h2>{selectedProject.product}</h2>
-        <div className="facts">
-          <Fact label="Manufacturer" value={selectedProject.manufacturer} />
-          <Fact label="Market" value={selectedProject.market} />
-          <Fact label="Device Class" value={selectedProject.deviceClass} />
-          <Fact label="Status" value={selectedProject.status} />
-        </div>
-        <button className="secondary-btn full" onClick={() => go('projects', `已进入 ${selectedProject.product} 的任务工作台。`)}>进入任务工作台 <ChevronRight size={16} /></button>
-      </section>
-      <section className="panel">
-        <span className="eyebrow">智能文件识别</span>
-        <h2>真实产品域</h2>
-        <div className="mini-list">
-          {['projects', 'clinical-eval', 'pms', 'nmpa', 'classifier', 'knowledge', 'qms', 'tplc', 'translation', 'organizations'].map((item) => (
-            <span key={item}>{item}</span>
-          ))}
-        </div>
-      </section>
-      <section className="panel span-3">
-        <div className="panel-head">
-          <div>
-            <span className="eyebrow">Workflow summary</span>
-            <h2>CER任务进展</h2>
-          </div>
-          <button className="ghost-btn" onClick={() => notify('审计记录模拟：记录生成、编辑、批准、导出、成员访问和版本变更。')}>查看审计记录</button>
-        </div>
-        <StepTimeline />
       </section>
     </div>
   );
