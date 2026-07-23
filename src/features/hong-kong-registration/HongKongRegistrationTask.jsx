@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Download, FileCheck2, LoaderCircle, RefreshCw, Trash2, Upload } from 'lucide-react';
 import './hong-kong-registration.css';
+import { buildDocumentTypeConfirmationPayload } from './confirmation-payload.js';
 
 const phases = ['上传文件', '文件识别', '文件类型与模板确认', '香港要求审查与修订', '待确认项', 'DOCX版本与下载'];
 const statusLabels = {
@@ -122,13 +123,7 @@ export function HongKongRegistrationTask({ project, api, notify }) {
     const result = await requestJson(api, `${base}/files/${file.fileId}/confirm-type`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        confirmedDocumentType: file.recommendedDocumentType,
-        recommendedDocumentType: file.recommendedDocumentType,
-        gn02ItemCode: file.gn02ItemCode,
-        templateIdentifier: file.templateIdentifier,
-        reasoningSummary: file.reasoningSummary
-      })
+      body: JSON.stringify(buildDocumentTypeConfirmationPayload(file))
     });
     setTask((current) => ({ ...current, files: current.files.map((item) => item.fileId === file.fileId ? result.file : item) }));
   });
