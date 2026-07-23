@@ -43,7 +43,7 @@ import {
 } from './features/hong-kong-registration/regulatory-options.js';
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
 import { profileFor, incompatiblePopulatedFieldsWithAliases, clearIncompatibleMarketFields, normalizeMarketProfile, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway, wizardSectionsFor } from './features/device-profile/market-profile-configurations.js';
-import { canVisitStep, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, savePlanForStepAction } from './features/device-profile/profile-navigation.js';
+import { canVisitStep, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, readStoredProfileDraft, savePlanForStepAction, writeStoredProfileDraft } from './features/device-profile/profile-navigation.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity },
@@ -888,8 +888,8 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
 
   useEffect(() => {
     if (mode === 'create') {
-      const savedDraft = localStorage.getItem(draftStorageKey);
-      setDraft(normalizeMarketProfile(savedDraft ? JSON.parse(savedDraft) : profile || defaultDeviceProfile));
+      const savedDraft = readStoredProfileDraft(localStorage, draftStorageKey, profile || defaultDeviceProfile);
+      setDraft(normalizeMarketProfile(savedDraft));
     } else {
       setDraft(normalizeMarketProfile(profile || defaultDeviceProfile));
     }
@@ -996,7 +996,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       }
       return nextProfile;
     });
-    setDirty(true);
+    markDirty();
   };
 
   const confirmRegionChange = () => {
@@ -1008,7 +1008,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
     const firstStep = profileFor(pendingRegionChange.value, normalizedNext).steps[0]?.id || 'basics';
     setActiveSection(firstStep);
     setVisitedSteps([firstStep]);
-    setDirty(true);
+    markDirty();
     setPendingRegionChange(null);
   };
 
@@ -1040,16 +1040,21 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       }
       return next;
     });
-    setDirty(true);
+    markDirty();
     notify(`已应用 ${extraction.candidates.length} 个候选字段，请检查后保存画像。`);
   };
 
-  const saveDraftLocally = () => {
-    localStorage.setItem(draftStorageKey, JSON.stringify(draft));
+  const markSaved = () => {
     setSavedAt(new Date());
     setDirty(false);
-    notify('画像草稿已保存到本机浏览器。');
   };
+
+  const markDirty = () => {
+    setDirty(true);
+    setSavedAt(null);
+  };
+
+  const saveRecoveryDraft = () => writeStoredProfileDraft(localStorage, draftStorageKey, draft);
 
   const saveExistingProfile = async (saveMode = 'draft') => {
     await api(`/projects/${projectId}/profile`, {
@@ -1060,13 +1065,24 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   };
 
   const saveDraft = async () => {
-    saveDraftLocally();
+    const localSaved = saveRecoveryDraft();
     const plan = savePlanForStepAction({ mode, action: 'draft' });
-    if (!plan.server) return;
+    if (!plan.server) {
+      if (!localSaved) {
+        markDirty();
+        notify('画像草稿未能保存到本机，请检查浏览器存储权限。');
+        return;
+      }
+      markSaved();
+      notify('画像草稿已保存到本机浏览器。');
+      return;
+    }
     try {
       await saveExistingProfile(plan.saveMode);
+      markSaved();
       notify('画像草稿已保存到项目。');
     } catch {
+      markDirty();
       notify('保存画像草稿失败，请确认本地 API 服务已启动。');
     }
   };
@@ -1089,19 +1105,31 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
 
   const advance = async () => {
     const result = nextStep({ steps: navigationSteps, activeStep: activeSection, missingByStep, visited: visitedSteps });
+    if (result.action === 'invalid') {
+      notify('当前步骤无效，请重新打开设备画像。');
+      return;
+    }
     if (result.action === 'missing') {
       notify(`当前步骤还有 ${result.missing.length} 项必填字段缺失。`);
       return;
     }
-    saveDraftLocally();
+    const localSaved = saveRecoveryDraft();
     const plan = savePlanForStepAction({ mode, action: 'next' });
     if (plan.server) {
       try {
         await saveExistingProfile(plan.saveMode);
+        markSaved();
       } catch {
+        markDirty();
         notify('自动保存设备画像失败，请确认本地 API 服务已启动。');
         return;
       }
+    } else if (!localSaved) {
+      markDirty();
+      notify('画像草稿未能保存到本机，请检查浏览器存储权限。');
+      return;
+    } else {
+      markSaved();
     }
     setVisitedSteps(result.visited);
     setActiveSection(result.nextStep);
@@ -1135,9 +1163,10 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       const updated = saved;
       await refreshDetail(projectId);
       await refreshProjects();
-      setDirty(false);
+      markSaved();
       notify(`设备画像已保存：${updated.basics?.productName || '未命名产品'}`);
     } catch {
+      if (mode === 'edit') markDirty();
       notify(mode === 'create' ? '创建项目失败：请确认必填字段和本地 API 服务。' : '保存设备画像失败：请确认本地 API 服务已启动。');
     }
   };
@@ -1164,8 +1193,9 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
         <div className="profile-steps">
           {resolvedProfileSections.map((item, index) => {
             const hasMissing = Boolean(missingByStep[item.id]?.length);
+            const access = canVisitStep({ steps: navigationSteps, targetStep: item.id, visited: visitedSteps, missingByStep });
             return (
-              <button key={item.id} className={activeSection === item.id ? 'profile-step active' : 'profile-step'} onClick={() => goToStep(item.id)}>
+              <button key={item.id} className={activeSection === item.id ? 'profile-step active' : 'profile-step'} aria-current={activeSection === item.id ? 'step' : undefined} aria-disabled={!access.allowed} onClick={() => goToStep(item.id)}>
                 <span>{index + 1}</span>
                 <div>
                   <strong>{item.title}</strong>

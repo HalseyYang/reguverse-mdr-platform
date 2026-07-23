@@ -122,6 +122,22 @@ test('creates a project, profile, and clinical evaluation task from a completed 
     });
     assert.equal(invalidOverrideUpdate.status, 400);
 
+    const marketDrafts = [
+      { profile: { basics: { regulation: 'NMPA', nmpa_device_class: 'II' }, pathway: { nmpa_registration_pathway: '首次注册' } }, removed: ['pathway', 'clinical_evaluation_pathway'] },
+      { profile: { basics: { regulation: 'FDA', united_states_fda_device_class: 'Class II' }, market: { legally_marketed_predicate_device: 'Yes', selected_submission_pathway: '510(k)' }, pathway: { fda_placeholder: '' } }, removed: ['pathway', 'nmpa_registration_pathway'] },
+      { profile: { basics: { regulation: '香港注册（MDACS）', hong_kong_device_class: 'Class II', hong_kong_classification_basis: 'RULE_6_SURGICALLY_INVASIVE_TRANSIENT' }, pathway: { hong_kong_application_pathway: '新申请' } }, removed: ['market', 'selected_submission_pathway'] },
+      { profile: basicsOnlyDraft, removed: ['pathway', 'hong_kong_application_pathway'] }
+    ];
+    for (const marketDraft of marketDrafts) {
+      const marketSwitchUpdate = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: marketDraft.profile, save_mode: 'draft' })
+      });
+      assert.equal(marketSwitchUpdate.status, 200);
+      const switched = await marketSwitchUpdate.json();
+      assert.equal(switched[marketDraft.removed[0]]?.[marketDraft.removed[1]], undefined);
+    }
+
     const finalUpdate = await fetch(`${baseUrl}/projects/${result.project.id}/profile`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ profile: basicsOnlyDraft, save_mode: 'final' })

@@ -1141,14 +1141,14 @@ app.put('/api/projects/:projectId/profile', async (req, res) => {
     updatedAt: new Date().toISOString()
   };
   if (existing) {
-    Object.assign(existing, profile);
+    db.deviceProfiles[db.deviceProfiles.indexOf(existing)] = profile;
   } else {
     db.deviceProfiles.push(profile);
   }
   Object.assign(project, profileProjectFields(profile));
   event(db, 'profile.saved', `保存设备画像：${project.product}`, { projectId: project.id, saveMode });
   await writeDb(db);
-  res.json(existing || profile);
+  res.json(profile);
 });
 
 app.post('/api/projects/:projectId/files', requireActiveProjectRequest, upload.single('file'), async (req, res) => {

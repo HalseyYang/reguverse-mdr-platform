@@ -7,7 +7,9 @@ import {
   isFinalStep,
   navigationStepIdForDataSection,
   canVisitStep,
-  savePlanForStepAction
+  savePlanForStepAction,
+  readStoredProfileDraft,
+  writeStoredProfileDraft
 } from '../src/features/device-profile/profile-navigation.js';
 
 const steps = [
@@ -19,16 +21,21 @@ const steps = [
 test('previousStep disables the first step and returns the preceding step otherwise', () => {
   assert.equal(previousStep(steps, 'basics'), null);
   assert.equal(previousStep(steps, 'confirmation'), 'scope');
+  assert.equal(previousStep([], 'basics'), null);
+  assert.equal(previousStep(steps, 'unknown'), null);
 });
 
 test('isFinalStep recognizes the market-specific last step', () => {
   assert.equal(isFinalStep(steps, 'scope'), false);
   assert.equal(isFinalStep(steps, 'confirmation'), true);
+  assert.equal(isFinalStep([], 'confirmation'), false);
+  assert.equal(isFinalStep(steps, 'unknown'), false);
 });
 
 test('navigationStepIdForDataSection maps confirmations to confirmation and falls back safely', () => {
   assert.equal(navigationStepIdForDataSection(steps, 'confirmations'), 'confirmation');
-  assert.equal(navigationStepIdForDataSection(steps, 'missing'), 'basics');
+  assert.equal(navigationStepIdForDataSection(steps, 'missing'), null);
+  assert.equal(navigationStepIdForDataSection([], 'basics'), null);
 });
 
 test('nextStep saves and advances exactly one step when the current step is complete', () => {
@@ -51,6 +58,11 @@ test('nextStep stays put and reports only current-step missing fields', () => {
   });
 });
 
+test('nextStep safely rejects empty steps and an unknown active step', () => {
+  assert.deepEqual(nextStep({ steps: [], activeStep: 'basics', missingByStep: {}, visited: [] }), { action: 'invalid', step: 'basics' });
+  assert.deepEqual(nextStep({ steps, activeStep: 'unknown', missingByStep: {}, visited: [] }), { action: 'invalid', step: 'unknown' });
+});
+
 test('canVisitStep allows visited history but rejects an unvisited future step with incomplete prerequisites', () => {
   assert.deepEqual(canVisitStep({ steps, targetStep: 'basics', visited: ['basics', 'scope'], missingByStep: { basics: [{}] } }), { allowed: true });
   assert.deepEqual(canVisitStep({ steps, targetStep: 'confirmation', visited: ['basics'], missingByStep: { basics: [{}] } }), {
@@ -62,6 +74,32 @@ test('canVisitStep allows visited history but rejects an unvisited future step w
 
 test('canVisitStep permits the immediate future only after all preceding steps are complete', () => {
   assert.deepEqual(canVisitStep({ steps, targetStep: 'scope', visited: ['basics'], missingByStep: {} }), { allowed: true });
+});
+
+test('canVisitStep safely rejects empty steps and unknown targets', () => {
+  assert.deepEqual(canVisitStep({ steps: [], targetStep: 'basics', visited: [], missingByStep: {} }), { allowed: false, reason: 'unknown-step' });
+  assert.deepEqual(canVisitStep({ steps, targetStep: 'unknown', visited: [], missingByStep: {} }), { allowed: false, reason: 'unknown-step' });
+});
+
+test('stored draft helpers survive invalid JSON and storage failures', () => {
+  const fallback = { basics: { regulation: 'EU MDR' } };
+  const invalidStorage = { getItem: () => '{bad json', removeItem() { this.removed = true; } };
+  assert.equal(readStoredProfileDraft(invalidStorage, 'draft', fallback), fallback);
+  assert.equal(invalidStorage.removed, true);
+  assert.equal(readStoredProfileDraft({ getItem() { throw new Error('blocked'); }, removeItem() {} }, 'draft', fallback), fallback);
+  assert.equal(writeStoredProfileDraft({ setItem() { throw new Error('quota'); } }, 'draft', fallback), false);
+  const saved = {};
+  assert.equal(writeStoredProfileDraft({ setItem: (key, value) => { saved[key] = value; } }, 'draft', fallback), true);
+  assert.deepEqual(JSON.parse(saved.draft), fallback);
+});
+
+test('stored draft reader rejects valid JSON values that are not profile objects', () => {
+  const fallback = { basics: { regulation: 'EU MDR' } };
+  for (const stored of ['null', '[]', '"draft"', '42']) {
+    const storage = { getItem: () => stored, removeItem() { this.removed = true; } };
+    assert.equal(readStoredProfileDraft(storage, 'draft', fallback), fallback);
+    assert.equal(storage.removed, true);
+  }
 });
 
 test('step save plans never create a project while advancing', () => {
