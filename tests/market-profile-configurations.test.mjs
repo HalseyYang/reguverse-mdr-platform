@@ -73,7 +73,7 @@ test('provides the approved step count and key market fields', () => {
   assert.equal(profileFor('EU MDR').steps.length, 7);
   assert.equal(profileFor('NMPA').steps.length, 7);
   assert.equal(profileFor('FDA').steps.length, 7);
-  assert.equal(profileFor(HONG_KONG_REGULATORY_REGION).steps.length, 6);
+  assert.equal(profileFor(HONG_KONG_REGULATORY_REGION).steps.length, 5);
 
   const nmpa = profileFor('NMPA', { market: { product_source: '进口' } });
   assert.ok(nmpa.fields.some((field) => field.name === 'overseas_registrant_full_name' && field.required));
@@ -89,10 +89,26 @@ test('provides the approved step count and key market fields', () => {
   assert.equal(fda.fields.find((field) => field.name === 'selected_submission_pathway').editable, true);
 
   const hk = profileFor(HONG_KONG_REGULATORY_REGION);
+  assert.equal(hk.steps[0].title, '基础信息');
+  assert.ok(!hk.steps.some((step) => step.id === 'confirmation'));
+  assert.ok(!hk.fields.some((field) => field.section === 'confirmations'));
   assert.ok(hk.fields.some((field) => field.name === 'hong_kong_local_responsible_person_email' && field.required));
+  assert.equal(hk.fields.find((field) => field.name === 'hong_kong_local_responsible_person_name').label, '香港本地责任人名称');
+  assert.equal(hk.fields.find((field) => field.name === 'hong_kong_local_responsible_person_address').label, '香港本地责任人地址');
+  assert.equal(hk.fields.find((field) => field.name === 'hong_kong_local_responsible_person_contact').label, '香港本地责任人联系人');
+  assert.equal(hk.fields.find((field) => field.name === 'hong_kong_local_responsible_person_phone').label, '香港本地责任人电话');
+  assert.equal(hk.fields.find((field) => field.name === 'hong_kong_local_responsible_person_email').label, '香港本地责任人电子邮箱');
   assert.deepEqual(hk.fields.find((field) => field.name === 'hong_kong_application_type').options, ['新申请', '变更申请', '续期维护', '待判断']);
   assert.deepEqual(hk.fields.find((field) => field.name === 'hong_kong_marketing_status').options, ['未在香港上市', '已在香港上市', '待确认']);
   assert.deepEqual(hk.fields.find((field) => field.name === 'relies_on_other_market_approval').options, ['Yes', 'No', 'To be determined']);
+  assert.ok(!hk.fields.some((field) => field.name === 'other_market_approval_type'));
+  const hkDependingOnOtherApproval = profileFor(HONG_KONG_REGULATORY_REGION, {
+    pathway: { relies_on_other_market_approval: 'Yes' }
+  });
+  assert.deepEqual(
+    hkDependingOnOtherApproval.fields.find((field) => field.name === 'other_market_approval_type').options,
+    ['NMPA', 'CE', 'FDA']
+  );
   assert.ok(!hk.steps.some((step) => step.id === 'evaluation_scope'));
   assert.deepEqual(fieldConfigurationForRegulatoryRegion(HONG_KONG_REGULATORY_REGION).deviceClasses, ['Class II', 'Class III', 'Class IV']);
 });
@@ -131,6 +147,16 @@ test('Hong Kong recommendation is editable but an override requires the formal r
   let result = validateMarketProfile(HONG_KONG_REGULATORY_REGION, profile);
   assert.ok(result.missing.includes('hong_kong_classification_override_reason'));
   profile.basics.hong_kong_classification_override_reason = 'Conservative classification based on intended use.';
+  result = validateMarketProfile(HONG_KONG_REGULATORY_REGION, profile);
+  assert.equal(result.code, null);
+});
+
+test('Hong Kong other-market approval selection is required only after Yes', () => {
+  const profile = completeHongKongProfile();
+  profile.pathway.relies_on_other_market_approval = 'Yes';
+  let result = validateMarketProfile(HONG_KONG_REGULATORY_REGION, profile);
+  assert.ok(result.missing.includes('other_market_approval_type'));
+  profile.pathway.other_market_approval_type = 'CE';
   result = validateMarketProfile(HONG_KONG_REGULATORY_REGION, profile);
   assert.equal(result.code, null);
 });

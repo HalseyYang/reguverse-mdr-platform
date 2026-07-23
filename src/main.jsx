@@ -117,7 +117,7 @@ const clinicalSteps = [
 ];
 
 const projectWizard = [
-  ['1', '器械基础', '法规类型、通用名/器械类型、器械类别、分类规则；不确定时先用AI分类工具。'],
+  ['1', '基础信息', '法规类型、通用名/器械类型、器械类别、分类规则；不确定时先用AI分类工具。'],
   ['2', '适用范围', '预期用途建议复制IFU英文原文；器械描述和工作原理可中文填写。'],
   ['3', '认证与市场', '初次CE、MDD转MDR、定期CER更新；影响Step 5/6安全数据检索范围。'],
   ['4', '公司信息', '制造商、SRN、注册地址；会进入最终CEP/CER文档。'],
@@ -206,7 +206,7 @@ const defaultDeviceProfile = {
 const profileSections = [
   {
     id: 'basics',
-    title: '器械基础',
+    title: '基础信息',
     hint: '这些字段会决定法规路径、分类判断和后续AI提示词的基础语境。',
     fields: [
       ['productName', '产品名称', true, 'input'],
@@ -425,7 +425,7 @@ function App() {
   const startProfileCreate = () => {
     setCreatingProfile(true);
     setActive('project-create');
-    notify('已进入新建项目画像：请先完成7步画像，再创建项目。');
+    notify('已进入新建项目：请完成当前法规区域的必填信息后创建项目。');
   };
 
   const ActiveIcon = active.startsWith('project') || active === 'projects' ? Workflow : navItems.find((item) => item.id === active)?.icon || Activity;
@@ -740,7 +740,7 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
         </div>
         <button className={creatingProfile ? 'side-project active' : 'side-project'} onClick={startProfileCreate}>
           <strong>新建项目画像</strong>
-          <span>从7步画像创建项目</span>
+          <span>填写信息并创建项目</span>
         </button>
         {projects.map((project) => (
           <button key={project.id} className={!creatingProfile && selectedProject.id === project.id ? 'side-project active' : 'side-project'} onClick={() => {
@@ -754,9 +754,9 @@ function Projects({ projects, selectedProject, setSelectedProject, selectedStep,
       <section className="panel task-workspace">
         <div className="project-header">
           <div>
-            <span className="eyebrow">{creatingProfile ? 'Create from profile' : 'Product description'}</span>
-            <h2>{creatingProfile ? '新建项目与设备画像' : selectedProject.title}</h2>
-            <p>{creatingProfile ? '完成必填字段后，系统会创建项目、设备画像和与法规区域对应的初始任务。' : `${selectedProject.manufacturer} · ${selectedProject.market} · ${selectedProject.deviceClass} · Digital Therapeutic / SaMD`}</p>
+            {!creatingProfile && <span className="eyebrow">Product description</span>}
+            <h2>{creatingProfile ? '新建项目' : selectedProject.title}</h2>
+            {!creatingProfile && <p>{`${selectedProject.manufacturer} · ${selectedProject.market} · ${selectedProject.deviceClass} · Digital Therapeutic / SaMD`}</p>}
           </div>
           <div className="button-row">
             <input className="hidden-file" ref={fileInput} type="file" onChange={uploadContextFile} />
@@ -964,7 +964,7 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
   );
   const navigationSteps = resolvedProfileSections.map(({ id, dataSectionId }) => ({ id, dataSectionId }));
   const missingWithOverrides = hasHongKongClassificationMismatch && !String(draft.basics?.hong_kong_classification_override_reason || '').trim()
-    ? [...missing, { sectionId: 'basics', key: 'hong_kong_classification_override_reason', label: '类别调整理由', text: '器械基础 / 类别调整理由' }]
+    ? [...missing, { sectionId: 'basics', key: 'hong_kong_classification_override_reason', label: '类别调整理由', text: '基础信息 / 类别调整理由' }]
     : missing;
   const missingByStep = missingWithOverrides.reduce((groups, item) => {
     const stepId = navigationStepIdForDataSection(navigationSteps, item.sectionId);
@@ -1006,6 +1006,10 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
       if (nextProfile.basics?.regulation === 'FDA' && !nextProfile.market?.selected_submission_pathway) {
         const recommended = recommendUnitedStatesFdaSubmissionPathway(nextProfile);
         if (recommended !== 'Needs regulatory assessment') nextProfile.market = { ...(nextProfile.market || {}), selected_submission_pathway: recommended };
+      }
+      if (sectionId === 'pathway' && key === 'relies_on_other_market_approval' && value !== 'Yes') {
+        const { other_market_approval_type, ...remainingPathway } = nextProfile.pathway || {};
+        nextProfile.pathway = remainingPathway;
       }
       return nextProfile;
     });
@@ -1192,17 +1196,14 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
         <div className="button-row"><button className="secondary-btn" onClick={() => setPendingRegionChange(null)}>取消</button><button className="primary-btn" onClick={confirmRegionChange}>确认切换</button></div>
       </div>}
       <div className="panel-head">
-        <div>
-          <span className="eyebrow">Device profile</span>
-          <h2>{mode === 'create' ? '新建项目与设备画像' : '项目与设备画像'}</h2>
-        </div>
+        {mode !== 'create' && <div><h2>项目与设备画像</h2></div>}
         <div className="button-row">
           <span className={missingWithOverrides.length ? 'status warn' : 'status ok'}>{missingWithOverrides.length ? `${missingWithOverrides.length} 项必填缺失` : '字段完整'}</span>
           {dirty && <span className="status draft">未保存</span>}
           {mode === 'create' && <button className="secondary-btn" onClick={onCancel}>取消</button>}
         </div>
       </div>
-      <div className="profile-layout">
+      <div className="profile-layout profile-layout-without-summary">
         <div className="profile-steps">
           {resolvedProfileSections.map((item, index) => {
             const hasMissing = Boolean(missingByStep[item.id]?.length);
@@ -1258,19 +1259,6 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
             )}
           </div>
         </div>
-        <aside className="profile-summary">
-          <span className="eyebrow">Live summary</span>
-          <h3>{draft.basics?.productName || '未命名产品'}</h3>
-          <Fact label="法规区域" value={draft.basics?.regulation || '-'} />
-          <Fact label="器械类别" value={draft.basics?.deviceClass || '-'} />
-          <Fact label="制造商" value={draft.company?.manufacturer || '-'} />
-          <Fact label="评价路径" value={draft.pathway?.evaluationPathway || '-'} />
-          <Fact label="画像状态" value={draft.confirmations?.status || '-'} />
-          <div className="summary-note">
-            <strong>将进入后续Prompt的关键输入</strong>
-            <p>{draft.scope?.intendedUse || '请补充预期用途。'}</p>
-          </div>
-        </aside>
       </div>
       {extraction && (
         <div className="extraction-review">
