@@ -43,7 +43,7 @@ import {
 import { ProjectManagement, ProjectNavGroup } from './features/project-management/project-navigation.jsx';
 import { HongKongRegistrationTask } from './features/hong-kong-registration/HongKongRegistrationTask.jsx';
 import { profileFor, incompatiblePopulatedFieldsWithAliases, clearIncompatibleMarketFields, normalizeMarketProfile, recommendHongKongDeviceClassForProfile, recommendUnitedStatesFdaSubmissionPathway, wizardSectionsFor } from './features/device-profile/market-profile-configurations.js';
-import { canVisitStep, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, readStoredProfileDraft, savePlanForStepAction, stepValidationMessage, writeStoredProfileDraft } from './features/device-profile/profile-navigation.js';
+import { canVisitStep, initializeNewProjectProfile, isFinalStep, navigationStepIdForDataSection, nextStep, previousStep, savePlanForStepAction, stepValidationMessage, writeStoredProfileDraft } from './features/device-profile/profile-navigation.js';
 
 const navItems = [
   { id: 'dashboard', label: '总览', icon: Activity }
@@ -861,8 +861,8 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
 
   useEffect(() => {
     if (mode === 'create') {
-      const savedDraft = readStoredProfileDraft(localStorage, draftStorageKey, profile || defaultDeviceProfile);
-      setDraft(normalizeMarketProfile(savedDraft));
+      const emptyProfile = initializeNewProjectProfile(localStorage, draftStorageKey, profile || defaultDeviceProfile);
+      setDraft(normalizeMarketProfile(emptyProfile));
     } else {
       setDraft(normalizeMarketProfile(profile || defaultDeviceProfile));
     }

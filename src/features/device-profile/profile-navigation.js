@@ -68,6 +68,15 @@ export function readStoredProfileDraft(storage, key, fallback) {
   }
 }
 
+export function initializeNewProjectProfile(storage, key, emptyProfile) {
+  try {
+    storage.removeItem(key);
+  } catch {
+    // A blocked storage API must not prevent a new project from starting empty.
+  }
+  return emptyProfile;
+}
+
 export function writeStoredProfileDraft(storage, key, profile) {
   try {
     storage.setItem(key, JSON.stringify(profile));

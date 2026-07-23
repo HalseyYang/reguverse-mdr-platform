@@ -9,6 +9,7 @@ import {
   canVisitStep,
   stepValidationMessage,
   savePlanForStepAction,
+  initializeNewProjectProfile,
   readStoredProfileDraft,
   writeStoredProfileDraft
 } from '../src/features/device-profile/profile-navigation.js';
@@ -113,6 +114,27 @@ test('stored draft reader rejects valid JSON values that are not profile objects
     assert.equal(readStoredProfileDraft(storage, 'draft', fallback), fallback);
     assert.equal(storage.removed, true);
   }
+});
+
+test('new project initialization discards the previous create-mode draft', () => {
+  const stored = {
+    'reguverse-profile-draft-create': JSON.stringify({
+      basics: { productName: '以前的产品', genericName: '以前的器械类型' },
+      company: { manufacturer: '以前的制造商' }
+    })
+  };
+  const storage = {
+    getItem: (key) => stored[key] || null,
+    removeItem: (key) => { delete stored[key]; }
+  };
+  const emptyProfile = {
+    projectId: null,
+    basics: { productName: '', genericName: '' },
+    company: { manufacturer: '' }
+  };
+
+  assert.equal(initializeNewProjectProfile(storage, 'reguverse-profile-draft-create', emptyProfile), emptyProfile);
+  assert.equal(stored['reguverse-profile-draft-create'], undefined);
 });
 
 test('step save plans never create a project while advancing', () => {
