@@ -378,7 +378,7 @@ function App() {
   const [selectedStep, setSelectedStep] = useState(clinicalSteps[1]);
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [prompt, setPrompt] = useState('请基于当前项目生成 CER 第2步全文评价的证据缺口与行动项。');
-  const [notice, setNotice] = useState('已加载丽和康医疗器械注册管理平台。项目、步骤和文件处理功能均可交互。');
+  const [notice, setNotice] = useState('已加载医疗器械注册管理平台。项目、步骤和文件处理功能均可交互。');
 
   const notify = (message) => setNotice(message);
 
@@ -432,8 +432,8 @@ function App() {
         <div className="brand">
           <div className="brand-logo"><img src="/assets/beauty-health-logo.jpg" alt="" /></div>
           <div className="brand-copy">
-            <strong>丽和康医疗器械<br />注册管理平台</strong>
-            <span>Beauty Health Medical Device Registration Platform</span>
+            <strong>医疗器械注册管理平台</strong>
+            <span>Medical Device Registration Platform</span>
           </div>
         </div>
         <nav className="nav">
