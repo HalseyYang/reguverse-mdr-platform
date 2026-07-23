@@ -1269,21 +1269,17 @@ function DeviceProfileWizard({ mode = 'edit', projectId, profile, notify, refres
           )}
         </div>
       )}
-      {missingWithOverrides.length > 0 && (
-        <div className="missing-list">
-          <strong>必填字段缺失</strong>
-          {missingWithOverrides.slice(0, 8).map((item) => <span key={item.text}>{item.text}</span>)}
-        </div>
-      )}
       <footer className="profile-navigation-footer">
         <button className="secondary-btn" disabled={!previousStep(navigationSteps, activeSection)} onClick={goBack}>上一步</button>
-        <div className="profile-save-state">
-          <button className="secondary-btn" onClick={saveDraft}>保存草稿</button>
-          {savedAt && <span>已保存 {savedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>}
+        <div className="profile-footer-actions">
+          <div className="profile-save-state">
+            <button className="secondary-btn" onClick={saveDraft}>保存草稿</button>
+            {savedAt && <span>已保存 {savedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>}
+          </div>
+          {finalStep
+            ? <button className="primary-btn" onClick={saveProfile}><CheckCircle2 size={16} />{mode === 'create' ? '创建项目' : '保存画像'}</button>
+            : <button className="primary-btn" onClick={advance}>下一步<ChevronRight size={16} /></button>}
         </div>
-        {finalStep
-          ? <button className="primary-btn" onClick={saveProfile}><CheckCircle2 size={16} />{mode === 'create' ? '创建项目' : '保存画像'}</button>
-          : <button className="primary-btn" onClick={advance}>下一步<ChevronRight size={16} /></button>}
       </footer>
     </section>
   );
