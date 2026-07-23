@@ -217,3 +217,57 @@ test('extracts profile candidates from natural-language device documentation', a
     await rm(backupPath, { force: true });
   }
 });
+
+test('manual-like extraction rejects maintenance and EMC false positives while using authoritative sections', async () => {
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: process.cwd(),
+    env: { ...process.env, PORT: String(port), DISABLE_AI_EXTRACTION: '1' },
+    stdio: 'ignore'
+  });
+
+  try {
+    await waitForApi();
+    const form = new FormData();
+    const text = [
+      '0476',
+      'Diode Laser Hair Removal Machine',
+      'GLD01/GLD10/GLD16/GLD19/GLD26 Model',
+      'User Manual',
+      'All rights reserved. Without permission of Beijing Goldenlaser Development Co., Ltd, this manual may not be copied.',
+      '',
+      'Intended Use',
+      'The Diode Laser Hair Removal Machine is intended for the removal of unwanted hair and to effect stable, long-term hair reduction.',
+      '',
+      'Routine Maintenance',
+      'This diode laser hair removal system is a precision medical device. Regular and proper maintenance is essential.',
+      '',
+      'RF emissions CISPR 11',
+      'Class A',
+      'The device is suitable for use in establishments other than domestic establishments.',
+      '',
+      'Symbols',
+      'Manufacturer',
+      'Voltage',
+      '',
+      'Manufacturer and Contact Information',
+      'Manufacture: Beijing Goldenlaser Development Co., Ltd',
+      'Address: A2-53A, No. 65, South Third Ring Road West, Fengtai District, Beijing China'
+    ].join('\n');
+    form.append('file', new Blob([text], { type: 'text/plain' }), 'diode-laser-user-manual.txt');
+
+    const response = await fetch(`${baseUrl}/profile-extractions/preview`, { method: 'POST', body: form });
+    assert.equal(response.status, 201);
+    const extraction = await response.json();
+    const candidate = (fieldKey) => extraction.candidates.find((item) => item.fieldKey === fieldKey);
+
+    assert.equal(candidate('productName')?.value, 'Diode Laser Hair Removal Machine');
+    assert.equal(candidate('genericName')?.value, 'Diode Laser Hair Removal Machine');
+    assert.equal(candidate('deviceClass'), undefined);
+    assert.equal(candidate('manufacturer')?.value, 'Beijing Goldenlaser Development Co., Ltd');
+    assert.equal(candidate('manufacturerAddress')?.value, 'A2-53A, No. 65, South Third Ring Road West, Fengtai District, Beijing China');
+    assert.match(candidate('intendedUse')?.sourceSnippet || '', /intended for the removal of unwanted hair/i);
+  } finally {
+    child.kill();
+    await wait(100);
+  }
+});

@@ -465,8 +465,39 @@ function snippetAround(text, value) {
   const cleanValue = compactText(value);
   if (!cleanValue) return cleanText.slice(0, 180);
   const index = cleanText.toLowerCase().indexOf(cleanValue.toLowerCase());
-  if (index < 0) return cleanText.slice(0, 180);
+  if (index < 0) return '';
   return cleanText.slice(Math.max(0, index - 70), Math.min(cleanText.length, index + cleanValue.length + 90));
+}
+
+function authoritativeSnippetAround(text, value, fieldKey) {
+  const cleanText = compactText(text);
+  const cleanValue = compactText(value);
+  if (!cleanValue) return '';
+  const lowerText = cleanText.toLowerCase();
+  const lowerValue = cleanValue.toLowerCase();
+  let index = lowerText.indexOf(lowerValue);
+  const snippets = [];
+  while (index >= 0) {
+    snippets.push(cleanText.slice(Math.max(0, index - 100), Math.min(cleanText.length, index + cleanValue.length + 120)));
+    index = lowerText.indexOf(lowerValue, index + lowerValue.length);
+  }
+  if (!snippets.length) return '';
+  if (fieldKey === 'manufacturer') {
+    const labeledValuePattern = new RegExp(
+      `\\b(?:(?:legal\\s+)?manufacturer(?:\\s+name)?|manufacture)\\s*[:：\\-–—]?\\s*${escapeRegExp(cleanValue)}`,
+      'i'
+    );
+    const labeledValueMatch = cleanText.match(labeledValuePattern);
+    if (!labeledValueMatch || labeledValueMatch.index === undefined) return '';
+    return cleanText.slice(
+      Math.max(0, labeledValueMatch.index - 70),
+      Math.min(cleanText.length, labeledValueMatch.index + labeledValueMatch[0].length + 90)
+    );
+  }
+  if (fieldKey === 'manufacturerAddress') {
+    return snippets.find((snippet) => /\baddress\s*[:：\-–—]/i.test(snippet)) || '';
+  }
+  return snippets[0];
 }
 
 function aiExtractionConfigured() {
@@ -586,15 +617,16 @@ async function extractProfileCandidatesWithAi(text) {
   return Object.entries(aiCandidateMap).flatMap(([jsonKey, [sectionId, fieldKey, label]]) => {
     const value = cleanExtractedValue(parsed[jsonKey] || '');
     if (!value) return [];
-    return [{
+    const candidate = {
       sectionId,
       fieldKey,
       label,
       value,
       confidence: 0.92,
       source: 'ai',
-      sourceSnippet: snippetAround(text, value)
-    }];
+      sourceSnippet: authoritativeSnippetAround(text, value, fieldKey)
+    };
+    return candidateHasAuthoritativeEvidence(candidate, text) ? [candidate] : [];
   });
 }
 
@@ -628,6 +660,60 @@ function findHeadingBlock(lines, index, allLabels) {
   return cleanExtractedValue(block.join(' ')).slice(0, 520);
 }
 
+function findManualProductTitle(lines) {
+  const firstPageLines = lines.slice(0, 16);
+  for (let index = 0; index < firstPageLines.length; index += 1) {
+    const line = firstPageLines[index];
+    if (!/\b(?:machine|system|device|instrument|apparatus|software)\b$/i.test(line)) continue;
+    const following = firstPageLines.slice(index + 1, index + 4).join(' ');
+    if (/\bmodel\b/i.test(following) && /\b(?:user manual|instructions? for use|ifu)\b/i.test(following)) {
+      return cleanExtractedValue(line);
+    }
+  }
+  return '';
+}
+
+function findManufacturerAddress(lines) {
+  const sectionIndex = lines.findIndex((line) => /^Manufacturer(?:\s+and\s+Contact)?\s+Information\s*$/i.test(line));
+  if (sectionIndex < 0) return '';
+  for (const line of lines.slice(sectionIndex + 1, sectionIndex + 10)) {
+    const match = line.match(/^Address\s*[:：\-–—]\s*(.+)$/i);
+    if (match) return cleanExtractedValue(match[1]);
+  }
+  return '';
+}
+
+function candidateHasAuthoritativeEvidence(candidate, text) {
+  const value = cleanExtractedValue(candidate?.value || '');
+  const sourceSnippet = candidate?.sourceSnippet || authoritativeSnippetAround(text, value, candidate?.fieldKey);
+  if (!value || !sourceSnippet) return false;
+  const context = sourceSnippet.toLowerCase();
+
+  if (candidate.fieldKey === 'genericName') {
+    if (/\b(?:routine|preventive)\s+maintenance\b|\bmaintenance\s+(?:is|shall|must)\b/i.test(sourceSnippet)) return false;
+    const lines = String(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const manualTitle = findManualProductTitle(lines);
+    const hasGenericNameLabel = /\b(?:generic name|device generic name|common name|device description|product description)\b/i.test(sourceSnippet);
+    return value.toLowerCase() === manualTitle.toLowerCase() || hasGenericNameLabel;
+  }
+
+  if (candidate.fieldKey === 'deviceClass') {
+    if (/\b(?:cispr|rf emissions?|electromagnetic|fitzpatrick|skin phototype|electric shock|protection against)\b/i.test(sourceSnippet)) return false;
+    return /\b(?:device|medical device|risk|mdr)\s+class(?:ification)?\b|\b(?:mdr|medical device|risk)\s+classification\b/i.test(sourceSnippet);
+  }
+
+  if (candidate.fieldKey === 'manufacturer') {
+    const organizationName = /\b(?:co\.?,?\s*ltd\.?|ltd\.?|company|inc\.?|corp\.?|corporation|gmbh|limited|llc|s\.?a\.?|plc)\b/i.test(value);
+    return organizationName && /\bmanufactur(?:e|er)\b/i.test(sourceSnippet);
+  }
+
+  if (candidate.fieldKey === 'manufacturerAddress') {
+    return /\baddress\s*[:：\-–—]/i.test(sourceSnippet);
+  }
+
+  return true;
+}
+
 function findFieldValue(text, rule) {
   const labels = rule.labels || [];
   const allLabels = extractionFieldRules.flatMap((item) => item.labels || []);
@@ -654,22 +740,28 @@ function findFieldValue(text, rule) {
 }
 
 const extractionFieldRules = [
-  { sectionId: 'basics', fieldKey: 'productName', label: '产品名称', confidence: 0.88, labels: ['Product Name', 'Device Name', 'Trade Name', 'Commercial Name', 'Name of Device', '产品名称', '器械名称'] },
+  {
+    sectionId: 'basics',
+    fieldKey: 'productName',
+    label: '产品名称',
+    confidence: 0.88,
+    labels: ['Product Name', 'Device Name', 'Trade Name', 'Commercial Name', 'Name of Device', '产品名称', '器械名称'],
+    fallback: (_text, lines) => findManualProductTitle(lines)
+  },
   {
     sectionId: 'basics',
     fieldKey: 'genericName',
     label: '通用名/器械类型',
     confidence: 0.78,
     labels: ['Generic Name', 'Device Generic Name', 'Common Name', 'Device Description', 'Product Description', '通用名', '器械通用名称'],
-    fallback: (text) => cleanExtractedValue(text.match(/\bis\s+(?:a|an)\s+([^.\n]{8,160}?(?:system|device|software|monitor|sensor|app|application|platform))/i)?.[1] || '')
+    fallback: (_text, lines) => findManualProductTitle(lines)
   },
   {
     sectionId: 'basics',
     fieldKey: 'deviceClass',
     label: '器械类别',
     confidence: 0.82,
-    labels: ['Device Class', 'Risk Class', 'MDR Classification', 'Medical Device Class', 'Classification', 'Classification under MDR', '器械类别', '管理类别'],
-    fallback: (text) => cleanExtractedValue(text.match(/\bClass\s+(I{1,3}[ab]?|A|B|C|D)\b/i)?.[0] || '')
+    labels: ['Device Class', 'Risk Class', 'MDR Classification', 'Medical Device Class', 'Classification under MDR', '器械类别', '管理类别']
   },
   {
     sectionId: 'basics',
@@ -686,8 +778,15 @@ const extractionFieldRules = [
   { sectionId: 'scope', fieldKey: 'useEnvironment', label: '使用环境', confidence: 0.76, labels: ['Use Environment', 'Environment of Use', 'Use Setting', 'Clinical Setting', 'Use Location', '使用环境', '使用场景'] },
   { sectionId: 'scope', fieldKey: 'operatingPrinciple', label: '工作原理', confidence: 0.8, labels: ['Operating Principle', 'Principle of Operation', 'Mode of Action', 'Working Principle', 'Technology Principle', '工作原理', '作用机理'] },
   { sectionId: 'market', fieldKey: 'clinicalStudySummary', label: '临床研究摘要', confidence: 0.78, labels: ['Clinical Study Summary', 'Clinical Evidence Summary', '临床研究摘要', '临床证据摘要'] },
-  { sectionId: 'company', fieldKey: 'manufacturer', label: '制造商', confidence: 0.86, labels: ['Manufacturer', 'Legal Manufacturer', 'Manufacturer Name', '制造商', '注册人'] },
-  { sectionId: 'company', fieldKey: 'manufacturerAddress', label: '制造商地址', confidence: 0.78, labels: ['Manufacturer Address', 'Registered Address', '制造商地址', '注册地址'] }
+  { sectionId: 'company', fieldKey: 'manufacturer', label: '制造商', confidence: 0.86, labels: ['Legal Manufacturer', 'Manufacturer Name', 'Manufacture', 'Manufacturer', '制造商', '注册人'] },
+  {
+    sectionId: 'company',
+    fieldKey: 'manufacturerAddress',
+    label: '制造商地址',
+    confidence: 0.78,
+    labels: ['Manufacturer Address', 'Registered Address', '制造商地址', '注册地址'],
+    fallback: (_text, lines) => findManufacturerAddress(lines)
+  }
 ];
 
 function mapProfileCandidates(text) {
@@ -695,15 +794,16 @@ function mapProfileCandidates(text) {
   for (const rule of extractionFieldRules) {
     const value = findFieldValue(text, rule);
     if (!value) continue;
-    candidates.push({
+    const candidate = {
       sectionId: rule.sectionId,
       fieldKey: rule.fieldKey,
       label: rule.label,
       value,
       confidence: rule.confidence,
       source: 'rules',
-      sourceSnippet: snippetAround(text, value)
-    });
+      sourceSnippet: authoritativeSnippetAround(text, value, rule.fieldKey)
+    };
+    if (candidateHasAuthoritativeEvidence(candidate, text)) candidates.push(candidate);
   }
   return candidates;
 }
