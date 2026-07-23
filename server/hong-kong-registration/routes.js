@@ -7,12 +7,24 @@ import {
   applyBrowserOcrPages, classifyProcessingMode, extractSourceContent, recommendDocumentType
 } from './extraction.js';
 import { classifyTemplateRequirement } from './templates.js';
+import { reviseSections } from './ai-revision.js';
+import { createRevisionDocx, nextDraftVersion } from './docx-revision.js';
 import {
   MAXIMUM_BYTE_LENGTH, MAXIMUM_FILE_COUNT_PER_UPLOAD, MAXIMUM_TOTAL_UPLOAD_BYTE_LENGTH, validateUploadBatch
 } from './store.js';
 
 function publicFile(file) {
   const { storedName, extractedStoredNames, draftsStoredNames, finalsStoredNames, ...safe } = file;
+  return {
+    ...safe,
+    latestRevision: publicRevision(safe.latestRevision),
+    revisionHistory: (safe.revisionHistory || []).map(publicRevision)
+  };
+}
+
+function publicRevision(revision) {
+  if (!revision) return null;
+  const { storedName, checkpoints, ...safe } = revision;
   return safe;
 }
 
@@ -21,7 +33,7 @@ function publicTask(task) {
 }
 
 function statusFor(error) {
-  if (['file_not_found', 'hong_kong_task_not_found', 'project_not_found'].includes(error.code)) return 404;
+  if (['file_not_found', 'revision_not_found', 'hong_kong_task_not_found', 'project_not_found'].includes(error.code)) return 404;
   if (['unsupported_file_type', 'content_signature_mismatch', 'damaged_file', 'encrypted_file'].includes(error.code)) return 422;
   if (error.code === 'file_too_large' || error.code === 'LIMIT_FILE_SIZE') return 413;
   if (['too_many_files', 'upload_batch_too_large', 'LIMIT_FILE_COUNT', 'LIMIT_PART_COUNT'].includes(error.code)) return 413;
@@ -30,12 +42,31 @@ function statusFor(error) {
   return 500;
 }
 
-export function createHongKongRegistrationRouter({ store, requireProjectAccess }) {
+export function createHongKongRegistrationRouter({ store, requireProjectAccess, invokeRevisionModel, revisionModels } = {}) {
   if (!store || !requireProjectAccess) throw new TypeError('store and requireProjectAccess are required');
   const router = express.Router({ mergeParams: true });
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAXIMUM_BYTE_LENGTH, files: MAXIMUM_FILE_COUNT_PER_UPLOAD, parts: MAXIMUM_FILE_COUNT_PER_UPLOAD + 8 }
+  });
+  const models = revisionModels || {
+    flashModel: process.env.DEEPSEEK_FLASH_MODEL || 'deepseek-chat',
+    proModel: process.env.DEEPSEEK_PRO_MODEL || 'deepseek-reasoner'
+  };
+  const invokeModel = invokeRevisionModel || (async ({ section, sourceText, model }) => {
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) throw Object.assign(new Error('revision_service_not_configured'), { code: 'revision_service_not_configured' });
+    const response = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        response_format: { type: 'json_object' },
+        messages: [{ role: 'user', content: `Revise section "${section}" for MDACS registration. Return JSON with content and openItems. Source:\n${sourceText}` }]
+      })
+    });
+    if (!response.ok) throw Object.assign(new Error('revision_model_failed'), { code: 'revision_model_failed' });
+    return JSON.parse((await response.json()).choices[0].message.content);
   });
 
   router.use(async (req, res, next) => {
@@ -87,6 +118,69 @@ export function createHongKongRegistrationRouter({ store, requireProjectAccess }
     try {
       const task = await store.mutateTask(req.params.projectId, (current) => retryFile(current, req.params.fileId));
       res.json({ file: publicFile(task.files.find((file) => file.fileId === req.params.fileId)) });
+    } catch (error) { next(error); }
+  });
+
+  async function runRevision(req, res, next, retry = false) {
+    try {
+      const task = await store.getTask(req.params.projectId);
+      const file = task?.files.find((item) => item.fileId === req.params.fileId);
+      if (!file) return res.status(404).json({ code: 'file_not_found' });
+      const version = nextDraftVersion(file.revisionHistory || []);
+      const sections = req.body?.sections || ['identity', 'intended_use', 'regulatory_content'];
+      const result = await reviseSections({
+        sourceFingerprint: file.sourceFingerprint || file.fileId,
+        templateIdentifier: file.templateIdentifier || req.body?.templateIdentifier || 'MDACS',
+        version,
+        sourceText: file.extraction?.textPreview || file.textPreview || '',
+        sections,
+        completedCheckpoints: retry ? (file.latestRevision?.checkpoints || {}) : {},
+        invokeModel,
+        models
+      });
+      const buffer = createRevisionDocx({
+        title: file.templateIdentifier || file.originalName,
+        version,
+        templateMarkdown: req.body?.templateMarkdown || '',
+        sections: Object.entries(result.checkpoints).map(([heading, value]) => ({ heading, content: value.content || '' })),
+        openItems: result.openItems
+      });
+      const saved = await store.saveRevision(req.params.projectId, file.fileId, {
+        version,
+        revisionKey: result.revisionKey,
+        checkpoints: result.checkpoints,
+        openItems: result.openItems,
+        canCreateFormalVersion: result.canCreateFormalVersion
+      }, buffer);
+      res.status(201).json({ revision: publicRevision(saved.revision) });
+    } catch (error) { next(error); }
+  }
+
+  router.post('/files/:fileId/revisions', (req, res, next) => runRevision(req, res, next));
+  router.post('/files/:fileId/revisions/retry', (req, res, next) => runRevision(req, res, next, true));
+  router.get('/files/:fileId/revisions/latest', async (req, res, next) => {
+    try {
+      const task = await store.getTask(req.params.projectId);
+      const file = task?.files.find((item) => item.fileId === req.params.fileId);
+      if (!file) return res.status(404).json({ code: 'file_not_found' });
+      if (!file.latestRevision) return res.status(404).json({ code: 'revision_not_found' });
+      res.json({ revision: publicRevision(file.latestRevision) });
+    } catch (error) { next(error); }
+  });
+  router.get('/files/:fileId/revisions/history', async (req, res, next) => {
+    try {
+      const task = await store.getTask(req.params.projectId);
+      const file = task?.files.find((item) => item.fileId === req.params.fileId);
+      if (!file) return res.status(404).json({ code: 'file_not_found' });
+      res.json({ revisions: (file.revisionHistory || []).map(publicRevision) });
+    } catch (error) { next(error); }
+  });
+  router.get('/files/:fileId/revisions/:version/download', async (req, res, next) => {
+    try {
+      const { revision, buffer } = await store.readRevisionArtifact(req.params.projectId, req.params.fileId, req.params.version);
+      res.setHeader('content-type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      res.setHeader('content-disposition', `attachment; filename="${req.params.fileId}-${revision.version}.docx"`);
+      res.send(buffer);
     } catch (error) { next(error); }
   });
 

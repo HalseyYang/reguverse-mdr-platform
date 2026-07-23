@@ -23,6 +23,11 @@ function validateIdentifier(value, kind) {
   return value;
 }
 
+function validateRevisionVersion(value) {
+  if (typeof value !== 'string' || !/^v\d+\.\d+$/.test(value)) throw storageError('invalid_revision_version');
+  return value;
+}
+
 function safelyResolve(root, ...segments) {
   const resolvedRoot = path.resolve(root);
   const target = path.resolve(resolvedRoot, ...segments);
@@ -257,9 +262,49 @@ export function createHongKongRegistrationStore({ dataRoot = path.resolve('data'
       await remove(projectDirectory(projectId), { recursive: true, force: true });
     });
   }
+  async function saveRevision(projectId, fileId, revision, buffer) {
+    validateIdentifier(fileId, 'file');
+    return serialize(projectId, async () => {
+      const task = await readTask(projectId);
+      if (!task) throw storageError('hong_kong_task_not_found');
+      const file = task.files.find((item) => item.fileId === fileId);
+      if (!file) throw storageError('file_not_found');
+      validateRevisionVersion(revision.version);
+      const storedName = `${fileId}-${revision.version}.docx`;
+      const directory = await ensureLayout(projectId);
+      await writeFile(safelyResolve(directory, 'drafts', storedName), buffer);
+      const now = new Date().toISOString();
+      const record = { ...revision, storedName, createdAt: revision.createdAt || now };
+      const history = [...(file.revisionHistory || []).filter((item) => item.version !== record.version), record];
+      file.revisionHistory = history;
+      file.latestRevision = record;
+      file.draftsStoredNames = [...new Set([...(file.draftsStoredNames || []), storedName])];
+      file.status = 'revision_completed';
+      file.updatedAt = now;
+      task.updatedAt = now;
+      await atomicWrite(projectId, task);
+      return { task, revision: record };
+    });
+  }
+
+  async function readRevisionArtifact(projectId, fileId, version) {
+    validateIdentifier(fileId, 'file');
+    validateRevisionVersion(version);
+    const task = await getTask(projectId);
+    const file = task?.files.find((item) => item.fileId === fileId);
+    if (!file) throw storageError('file_not_found');
+    const revision = (file.revisionHistory || []).find((item) => item.version === version);
+    if (!revision) throw storageError('revision_not_found');
+    if (path.basename(revision.storedName) !== revision.storedName) throw storageError('invalid_storage_record');
+    return { revision, buffer: await readFile(safelyResolve(projectDirectory(projectId), 'drafts', revision.storedName)) };
+  }
+
   function collectProjectStorage(projectId) { return { projectId: validateIdentifier(projectId, 'project'), directory: projectDirectory(projectId) }; }
 
-  return { root, createTask, getTask, mutateTask, addSourceFiles, deleteFile, cleanupProjectStorage, collectProjectStorage };
+  return {
+    root, createTask, getTask, mutateTask, addSourceFiles, deleteFile, saveRevision,
+    readRevisionArtifact, cleanupProjectStorage, collectProjectStorage
+  };
 }
 
 export { MAXIMUM_BYTE_LENGTH, MAXIMUM_FILE_COUNT_PER_UPLOAD, MAXIMUM_TOTAL_UPLOAD_BYTE_LENGTH };
